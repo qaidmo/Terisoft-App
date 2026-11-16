@@ -1,0 +1,1030 @@
+import 'package:get/get.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:untitled4/models/full_sales_invoice.dart';
+import 'package:untitled4/repositories/sales_repository.dart';
+import 'package:untitled4/user_state.dart';
+import 'package:untitled4/utils/snackbar_helper.dart';
+import 'package:untitled4/screens/controllers/station_transaction_header_controller.dart';
+import 'package:untitled4/screens/controllers/station_input_section_controller.dart';
+import 'package:untitled4/screens/controllers/station_products_controller.dart';
+import 'package:untitled4/screens/controllers/station_calculations_controller.dart';
+import 'package:untitled4/services/lookups_service.dart.dart';
+import 'package:untitled4/screens/pdf/pdf_view.dart';
+import 'package:untitled4/screens/previous_invoices_screen.dart';
+import 'package:untitled4/admin/controllers/invoice_templates_controller.dart';
+import 'package:untitled4/utils/number_to_words_converter.dart';
+import '../../i_price_change_permission.dart';
+import '../../utils/trial_period_manager.dart';
+import '../../utils/sales_payment_dialog_helper.dart';
+import 'package:untitled4/repositories/lookups_repository.dart';
+import 'package:untitled4/core/database_helper.dart';
+import 'package:untitled4/models/sun_customer.dart';
+
+const String _kCurrentScreenName = 'StationsCollectionScreen';
+
+class StationsCollectionController extends GetxController implements IPriceChangePermission {
+  final UserState userState = Get.find<UserState>();
+  final InvoiceTemplatesController _invoiceTemplatesController = Get.find<InvoiceTemplatesController>();
+  final SalesRepository _salesRepository = SalesRepository();
+  final LookupsService _lookupsService = Get.find<LookupsService>();
+  final LookupsRepository _lookupsRepository = LookupsRepository();
+
+  late final StationsCollectionTransactionHeaderController headerController;
+  late final StationsCollectionInputSectionController inputController;
+  late final StationsCollectionProductsController productsController;
+  late final StationsCollectionCalculationsController calculationsController;
+
+  final RxBool isLoading = false.obs;
+  final RxBool isManualSyncing = false.obs;
+  final RxnString currentInvoiceId = RxnString();
+  final RxBool isReadOnly = false.obs;
+  final RxBool isPumpModeActive = false.obs;
+  final RxBool isUtilityModeActive = false.obs;
+  final RxBool isCreditSale = false.obs;
+
+  final RxBool isNetworkSale = false.obs;
+  final Rxn<Map<String, dynamic>> selectedNetworkBox = Rxn<Map<String, dynamic>>();
+  double networkPaidAmount = 0.0;
+
+  @override
+  final RxBool canUserChangePrice = false.obs;
+  late final String _tag;
+
+  StationsCollectionController({String? initialInvoiceId, required String controllerTag}) {
+    _tag = controllerTag;
+
+    if (initialInvoiceId != null) {
+      currentInvoiceId.value = initialInvoiceId;
+    }
+    if (userState.canAccessScreen(_kCurrentScreenName)) {
+      canUserChangePrice.value = userState.canChangePrice(_kCurrentScreenName);
+    }
+
+    calculationsController = Get.put(StationsCollectionCalculationsController(), tag: _tag);
+    headerController = Get.put(StationsCollectionTransactionHeaderController(), tag: _tag);
+    inputController = Get.put(StationsCollectionInputSectionController(inputTag: _tag), tag: _tag);
+    productsController = Get.put(StationsCollectionProductsController(controllerTag: _tag), tag: _tag);
+  }
+
+  @override
+  void onInit() {
+    super.onInit();
+    if (!userState.canAccessScreen(_kCurrentScreenName)) {
+      _showUserFriendlyMessage('عذراً، ليس لديك صلاحية الوصول لهذه الشاشة.', isError: true);
+      Future.delayed(Duration.zero, () => Get.back());
+      return;
+    }
+
+    productsController.isReturnMode = false;
+
+    _initializeScreenData();
+    _triggerBackgroundSync();
+    _loadTableSettings();
+  }
+
+  Future<void> _initializeScreenData() async {
+    isLoading.value = true;
+    try {
+      await Future.wait([
+        _invoiceTemplatesController.fetchInvoiceTemplates(),
+        _ensureLookupsLoaded(),
+      ]);
+
+      final args = Get.arguments;
+      if (args != null && args is Map && args['isRemote'] == true) {
+        isReadOnly.value = true;
+        await _loadRemoteInvoice(args);
+      } else {
+        isReadOnly.value = false;
+        if (currentInvoiceId.value == null) {
+          await Future.wait([
+            inputController.loadInitialData(),
+            headerController.generateAndSetNextTransactionNumber(),
+          ]);
+        } else {
+          await _loadInvoiceForEditing(currentInvoiceId.value!);
+        }
+      }
+    } catch (e) {
+      _showUserFriendlyMessage('حدث خطأ أثناء تجهيز الصفحة، يرجى إعادة المحاولة.', isError: true);
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  Future<void> _loadTableSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    isPumpModeActive.value = prefs.getBool('isPumpModeActive') ?? false;
+    isUtilityModeActive.value = prefs.getBool('isUtilityModeActive') ?? false;
+  }
+
+  Future<void> toggleTableSetting(String key, bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    switch (key) {
+      case 'pump_mode':
+        isPumpModeActive.value = value;
+        await prefs.setBool('isPumpModeActive', value);
+        break;
+      case 'utility_mode':
+        isUtilityModeActive.value = value;
+        await prefs.setBool('isUtilityModeActive', value);
+        break;
+    }
+    productsController.products.refresh();
+  }
+
+  Future<void> _loadRemoteInvoice(Map args) async {
+    try {
+      final String transactionId = args['invoiceId'].toString();
+      final int branchId = int.parse(args['remoteBranchId'].toString());
+      final String year = args['remoteYear'].toString();
+
+      final prefs = await SharedPreferences.getInstance();
+      final String? serverUrl = prefs.getString('server_address');
+
+      if (serverUrl == null || serverUrl.isEmpty) {
+        throw Exception('عنوان السيرفر غير محفوظ');
+      }
+
+      final FullSalesInvoice fullInvoice = await _salesRepository.fetchInvoiceFromApi(
+        serverUrl: serverUrl,
+        token: "",
+        transactionId: transactionId,
+        branchId: branchId,
+        year: year,
+      );
+
+      final invoiceData = fullInvoice.sale;
+
+      currentInvoiceId.value = invoiceData.id;
+      headerController.transactionNumber.value = invoiceData.transactionNumber;
+      headerController.selectedDate.value = invoiceData.date;
+
+      await Future.wait([
+        inputController.fetchAndAddMissingBox(invoiceData.boxNo, fallbackName: invoiceData.boxName),
+        inputController.fetchAndAddMissingStore(invoiceData.storeNo, fallbackName: invoiceData.storeName),
+        inputController.fetchAndAddMissingCurrenciesForBox(
+            invoiceData.boxNo,
+            fallbackCurrencyName: invoiceData.currency,
+            fallbackRate: invoiceData.currencyRate
+        ),
+      ]);
+
+      inputController.selectedBox.value = invoiceData.boxName ?? '';
+      inputController.selectedStore.value = invoiceData.storeName ?? '';
+      inputController.updateSelectedCurrency(invoiceData.currency);
+
+      inputController.customerNameController.text = invoiceData.customerName ?? '';
+
+      calculationsController.updateAll(
+        total: invoiceData.total,
+        tax: 0.0,
+      );
+
+      productsController.loadInvoiceProducts(fullInvoice.items.map((e) => {
+        'item_no': e.itemNo,
+        'item_name': e.itemName,
+        'item_price': e.itemPrice,
+        'quantity': e.quantity,
+        'bonus_quantity': e.bonusQuantity,
+        'item_discount': e.itemDiscount,
+        'total_item': e.total,
+        'is_taxable': e.isTaxable,
+        'tax_rate': e.taxRate,
+        'is_discountable': e.isDiscountable,
+        'discount_rate': e.discountRate,
+        'item_unit': e.itemUnit,
+        'pack_factor': e.packFactor,
+        'expiry_date': e.expiryDate,
+        'batch_no': e.batchNumber,
+        'stock_balance': e.stockBalance,
+        'cost_center_no': e.costCenterNo,
+        'cost_price': e.costPrice,
+        'pump_name': e.pumpName,
+        'previous_reading': e.previousReading,
+        'current_reading': e.currentReading,
+      }).toList());
+
+    } catch (e) {
+      _showUserFriendlyMessage('فشل جلب الفاتورة من السيرفر: $e', isError: true);
+      Get.back();
+    }
+  }
+
+  Future<void> _ensureLookupsLoaded() async {
+    if (_lookupsService.productsList.isEmpty || _lookupsService.customersList.isEmpty) {
+      try {
+        await _lookupsService.loadAllLookupData();
+      } catch (e) {
+        throw Exception('فشل تحميل البيانات الأساسية');
+      }
+    }
+  }
+
+  @override
+  void onClose() {
+    Get.delete<StationsCollectionCalculationsController>(tag: _tag, force: true);
+    Get.delete<StationsCollectionTransactionHeaderController>(tag: _tag, force: true);
+    Get.delete<StationsCollectionInputSectionController>(tag: _tag, force: true);
+    Get.delete<StationsCollectionProductsController>(tag: _tag, force: true);
+    super.onClose();
+  }
+
+  void _showUserFriendlyMessage(String message, {bool isError = true}) {
+    if (Get.isSnackbarOpen) {
+      Get.closeCurrentSnackbar();
+    }
+    final String title = isError ? 'تنبيه' : 'عملية ناجحة';
+    AppSnackbar.showCustomSnackbar(title, message, isError: isError);
+  }
+
+  Future<void> _loadInvoiceForEditing(String invoiceId) async {
+    isLoading.value = true;
+    try {
+      final FullSalesInvoice fullInvoice = await _salesRepository.loadInvoice(invoiceId);
+      final invoiceData = fullInvoice.sale;
+      final int? loadedBoxNo = invoiceData.boxNo;
+      final int? loadedStoreNo = invoiceData.storeNo;
+
+      await inputController.loadInitialData();
+
+      await Future.wait([
+        if (loadedBoxNo != null) inputController.fetchAndAddMissingBox(loadedBoxNo),
+        if (loadedStoreNo != null) inputController.fetchAndAddMissingStore(loadedStoreNo),
+        if (loadedBoxNo != null) inputController.fetchAndAddMissingCurrenciesForBox(loadedBoxNo),
+      ]);
+
+      currentInvoiceId.value = invoiceData.id;
+      headerController.transactionNumber.value = invoiceData.transactionNumber;
+      headerController.selectedDate.value = invoiceData.date;
+
+      final boxName = inputController.boxes.firstWhereOrNull((b) => b.boxNo == loadedBoxNo)?.boxName;
+      final storeName = inputController.stores.firstWhereOrNull((s) => s.noStore == loadedStoreNo)?.nameStore;
+
+      inputController.selectedBox.value = boxName ?? '';
+      inputController.selectedStore.value = storeName ?? '';
+      inputController.updateSelectedCurrency(invoiceData.currency);
+
+      _setCustomerForEditing(invoiceData.accountNo, invoiceData.customerName);
+
+      calculationsController.updateAll(
+        total: invoiceData.total,
+        tax: 0.0,
+      );
+
+      final db = await DatabaseHelper.instance.database;
+      final postingsRows = await db.query(
+        'sun_general_ledger_postings',
+        where: 'transaction_id = ? AND description LIKE ?',
+        whereArgs: [invoiceId, '%(شبكة)%'],
+      );
+
+      if (postingsRows.isNotEmpty) {
+        isNetworkSale.value = true;
+        final networkPosting = postingsRows.first;
+        networkPaidAmount = (networkPosting['original_amount'] as num?)?.toDouble() ?? 0.0;
+        selectedNetworkBox.value = {
+          'account_id': networkPosting['account_id'],
+          'name': networkPosting['entity_name'],
+        };
+      } else {
+        isNetworkSale.value = false;
+        networkPaidAmount = 0.0;
+        selectedNetworkBox.value = null;
+      }
+
+      if (invoiceData.invoiceTypeChar == 'ك ن' || invoiceData.invoiceTypeChar == 'ك ج') {
+        isUtilityModeActive.value = true;
+        isCreditSale.value = (invoiceData.invoiceTypeChar == 'ك ج');
+        if (invoiceData.traSrv != null && invoiceData.traSrv! > 0) {
+          inputController.subscriptionFeeController.text = invoiceData.traSrv!.toStringAsFixed(2);
+        }
+      }
+
+      if (invoiceData.accountNo != null && invoiceData.accountNo!.isNotEmpty) {
+        try {
+          final db = await DatabaseHelper.instance.database;
+          final cusRows = await db.query(
+            'sun_customers',
+            where: 'account_id = ?',
+            whereArgs: [invoiceData.accountNo],
+            limit: 1,
+          );
+          if (cusRows.isNotEmpty) {
+            inputController.selectedCustomer.value = SunCustomer.fromMap(cusRows.first);
+          }
+        } catch (_) {}
+      }
+
+      productsController.loadInvoiceProducts(fullInvoice.items.map((e) => {
+        'item_no': e.itemNo,
+        'item_name': e.itemName,
+        'item_price': e.itemPrice,
+        'quantity': e.quantity,
+        'bonus_quantity': e.bonusQuantity,
+        'item_discount': e.itemDiscount,
+        'total_item': e.total,
+        'is_taxable': e.isTaxable,
+        'tax_rate': e.taxRate,
+        'is_discountable': e.isDiscountable,
+        'discount_rate': e.discountRate,
+        'item_unit': e.itemUnit,
+        'pack_factor': e.packFactor,
+        'expiry_date': e.expiryDate,
+        'batch_no': e.batchNumber,
+        'stock_balance': e.stockBalance,
+        'cost_center_no': e.costCenterNo,
+        'cost_price': e.costPrice,
+        'pump_name': e.pumpName,
+        'previous_reading': e.previousReading,
+        'current_reading': e.currentReading,
+        'trad_tra_tax': e.tradTraTax ?? 0.0,
+      }).toList());
+
+    } catch (e) {
+      _showUserFriendlyMessage('تعذر تحميل الفاتورة المطلوبة، قد تكون حذفت أو تغيرت صلاحياتك.', isError: true);
+      resetForm();
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  void _setCustomerForEditing(String accountNo, String? customerName) {
+    inputController.customerNameController.text = customerName ?? '...';
+  }
+
+
+
+  Future<void> saveSale({bool showSuccessMessage = true}) async {
+    if (isReadOnly.value) {
+      _showUserFriendlyMessage('هذه الفاتورة للعرض فقط ولا يمكن تعديلها.', isError: true);
+      return;
+    }
+
+    final actualProducts = productsController.products.where((item) => item['isEmpty'] != true).toList();
+
+    if (actualProducts.isEmpty) {
+      _showUserFriendlyMessage(
+          isUtilityModeActive.value
+              ? 'السلة فارغة! الرجاء إضافة صنف الخدمة قبل الحفظ.'
+              : 'السلة فارغة! الرجاء إضافة أصناف قبل الحفظ.',
+          isError: true);
+      return;
+    }
+
+    if (isUtilityModeActive.value) {
+      if (inputController.selectedCustomer.value == null) {
+        _showUserFriendlyMessage('يرجى اختيار العميل أولاً لحفظ فاتورة الخدمات.', isError: true);
+        return;
+      }
+
+      final item = actualProducts.first;
+      final currStr = item['current_reading']?.toString().trim() ?? '';
+      final curr = double.tryParse(currStr);
+
+      if (curr == null || currStr.isEmpty || curr <= 0) {
+        _showUserFriendlyMessage('يرجى إدخال القراءة الحالية للعداد بشكل صحيح.', isError: true);
+        return;
+      }
+
+      final prevStr = item['previous_reading']?.toString().trim() ?? '0';
+      final prev = double.tryParse(prevStr) ?? 0.0;
+
+      if (curr < prev) {
+        _showUserFriendlyMessage(
+          'خطأ: القراءة الحالية ($curr) أقل من القراءة السابقة ($prev)! لا يمكن أن يكون الاستهلاك سالباً.',
+          isError: true,
+        );
+        return;
+      }
+
+      if (curr == prev) {
+        _showUserFriendlyMessage(
+          'تنبيه: القراءة الحالية مطابقة للقراءة السابقة ($curr)، كمية الاستهلاك تساوي صفراً!',
+          isError: true,
+        );
+        return;
+      }
+    } else if (isPumpModeActive.value) {
+      if (actualProducts.any((item) {
+        final prev = double.tryParse(item['previous_reading']?.toString() ?? '0') ?? 0;
+        final curr = double.tryParse(item['current_reading']?.toString() ?? '0') ?? 0;
+        return curr < prev;
+      })) {
+        _showUserFriendlyMessage('خطأ: القراءة الحالية لا يمكن أن تكون أقل من القراءة السابقة للطرمبة!', isError: true);
+        return;
+      }
+    }
+
+    if (inputController.selectedBoxNo == null || inputController.selectedStoreNo == null) {
+      _showUserFriendlyMessage('يرجى التأكد من اختيار الصندوق والمخزن.', isError: true);
+      return;
+    }
+
+    final bool hasZeroValue = actualProducts.any((item) {
+      final double qty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
+      final double price = (item['item_price'] as num?)?.toDouble() ?? 0.0;
+      return qty <= 0 || price <= 0;
+    });
+
+    if (hasZeroValue) {
+      _showUserFriendlyMessage('لا يمكن حفظ الفاتورة. يوجد أصناف بكمية أو سعر يقل أو يساوي صفر.', isError: true);
+      return;
+    }
+
+    if (currentInvoiceId.value == null) {
+      if (isUtilityModeActive.value) {
+        final paymentResult = await SalesPaymentDialogHelper.processUtilityPayment(
+          totalRequired: calculationsController.total.value,
+          lookupsRepository: _lookupsRepository,
+        );
+
+        if (paymentResult == null) {
+          return;
+        }
+
+        isCreditSale.value = paymentResult.isCredit;
+        isNetworkSale.value = paymentResult.isNetwork;
+        selectedNetworkBox.value = paymentResult.selectedNetworkBox;
+        networkPaidAmount = paymentResult.networkPaidAmount;
+      } else {
+        final paymentResult = await SalesPaymentDialogHelper.processPayment(
+          totalRequired: calculationsController.total.value,
+          lookupsRepository: _lookupsRepository,
+        );
+
+        if (paymentResult == null) {
+          return; 
+        }
+
+        isCreditSale.value = false;
+        isNetworkSale.value = paymentResult.isNetwork;
+        selectedNetworkBox.value = paymentResult.selectedNetworkBox;
+        networkPaidAmount = paymentResult.networkPaidAmount;
+      }
+    }
+
+    await _executeSaveSale(showSuccessMessage: showSuccessMessage, actualProducts: actualProducts);
+  }
+
+  Future<void> _executeSaveSale({bool showSuccessMessage = true, required List<Map<String, dynamic>> actualProducts}) async {
+    final String currentTypeChar = isUtilityModeActive.value
+        ? (isCreditSale.value ? 'ك ج' : 'ك ن')
+        : 'ت';
+
+    if (currentInvoiceId.value == null) {
+      final checkResult = await TrialPeriodManager.checkOnSave(invoiceTypeChar: currentTypeChar);
+      if (checkResult != TrialSaveCheckResult.allow) return;
+    }
+
+    isLoading.value = true;
+
+    try {
+      final saleHeader = _prepareSaleHeader();
+      final saleItems = _prepareSaleItems(actualProducts);
+      final ledgerPostings = await _prepareLedgerPostings(actualProducts);
+
+      if (currentInvoiceId.value == null) {
+        if (!userState.canAdd(_kCurrentScreenName)) {
+          throw Exception('PERMISSION_DENIED');
+        }
+
+        final result = await _salesRepository.saveCompleteSale(
+          saleHeader: saleHeader,
+          saleItems: saleItems,
+          ledgerPostings: ledgerPostings,
+        );
+
+        final newSaleId = result['id'].toString();
+        final newTransactionNumber = result['transaction_number'].toString();
+
+        if (newSaleId.isNotEmpty) {
+          currentInvoiceId.value = newSaleId;
+          headerController.transactionNumber.value = newTransactionNumber;
+        }
+
+        if (showSuccessMessage) {
+          _showUserFriendlyMessage('تم حفظ الفاتورة بنجاح. رقم: $newTransactionNumber', isError: false);
+        }
+
+        if (isUtilityModeActive.value) {
+          if (inputController.selectedCustomer.value != null) {
+            final customer = inputController.selectedCustomer.value!;
+            double maxCurrReading = 0.0;
+            for (var item in actualProducts) {
+              final curr = double.tryParse(item['current_reading']?.toString() ?? '0') ?? 0.0;
+              if (curr > maxCurrReading) maxCurrReading = curr;
+            }
+            if (maxCurrReading > 0) {
+              try {
+                final db = await DatabaseHelper.instance.database;
+                if (db != null) {
+                  await db.rawUpdate(
+                    'UPDATE sun_customers SET cost_next = ? WHERE customer_no = ?',
+                    [maxCurrReading, customer.customerNo],
+                  );
+                  inputController.selectedCustomer.value = customer.copyWith(costNext: maxCurrReading);
+                }
+              } catch (e) {
+                print('Error updating local customer reading: $e');
+              }
+            }
+          }
+        } else {
+          try {
+            final db = await DatabaseHelper.instance.database;
+            if (db != null) {
+              for (var item in actualProducts) {
+                final pumpName = item['pump_name']?.toString();
+                final curr = double.tryParse(item['current_reading']?.toString() ?? '0') ?? 0;
+                if (pumpName != null && pumpName.isNotEmpty && curr > 0) {
+                  await db.rawUpdate('UPDATE sun_pumps SET m_right = ? WHERE m_name = ?', [curr, pumpName]);
+                }
+              }
+            }
+          } catch (e) {
+            print('Error updating local pump reading: $e');
+          }
+        }
+
+        await TrialPeriodManager.handlePostSave(
+          invoiceTypeChar: currentTypeChar,
+          screenTitle: isUtilityModeActive.value ? 'فاتورة خدمات المحطة' : 'فاتورة بيع المحطات',
+        );
+
+      } else {
+        if (!userState.canEdit(_kCurrentScreenName)) {
+          throw Exception('PERMISSION_DENIED');
+        }
+
+        await _salesRepository.updateCompleteSale(
+          invoiceId: int.parse(currentInvoiceId.value!),
+          saleHeader: saleHeader,
+          saleItems: saleItems,
+          ledgerPostings: ledgerPostings,
+        );
+
+        if (showSuccessMessage) {
+          _showUserFriendlyMessage('تم تعديل الفاتورة بنجاح.', isError: false);
+        }
+      }
+
+      _triggerBackgroundSync();
+
+    } catch (e) {
+      if (e.toString().contains('PERMISSION_DENIED')) {
+        _showUserFriendlyMessage('ليس لديك الصلاحية لإتمام هذه العملية.', isError: true);
+      } else {
+        _showUserFriendlyMessage('فشلت عملية الحفظ: $e', isError: true);
+      }
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  Map<String, dynamic> _prepareSaleHeader() {
+    final selectedCurrencyObj = inputController.currencies.firstWhereOrNull(
+        (c) => c.currencyName == inputController.selectedCurrency.value);
+
+    final String invoiceTypeChar = isUtilityModeActive.value
+        ? (isCreditSale.value ? 'ك ج' : 'ك ن')
+        : 'ت';
+
+    final String customerAccountNo = isUtilityModeActive.value && inputController.selectedCustomer.value != null
+        ? ((inputController.selectedCustomer.value!.accountId != null && inputController.selectedCustomer.value!.accountId!.trim().isNotEmpty)
+            ? inputController.selectedCustomer.value!.accountId!.trim()
+            : inputController.selectedCustomer.value!.customerNo.toString())
+        : '';
+
+    return {
+      'transaction_number': currentInvoiceId.value == null ? '' : headerController.transactionNumber.value,
+      'date': headerController.selectedDate.value.toIso8601String(),
+      'box_no': inputController.selectedBoxNo,
+      'store_no': inputController.selectedStoreNo,
+      'currency': inputController.selectedCurrency.value,
+      'currency_id': selectedCurrencyObj?.currencyNo ?? 1,
+      'currency_rate': inputController.selectedExchangeRate.value,
+      'customer_name': inputController.customerNameController.text.trim().isEmpty ? '...' : inputController.customerNameController.text.trim(),
+      'account_no': customerAccountNo,
+      'collector_id': null,
+      'agent_id': null,
+      'total': calculationsController.total.value,
+      'tax': 0.0,
+      'discount': 0.0,
+      'net_total': calculationsController.total.value,
+      'user_id': userState.userNo,
+      'invoice_type_char': invoiceTypeChar,
+      'tra_srv': isUtilityModeActive.value ? calculationsController.totalCharges.value : 0.0,
+      'sun_year': userState.safeFinancialYearName,
+      'branch_id': userState.userBranch,
+      'department_id': userState.userDepartment,
+      'source_last_updated_at': DateTime.now().toString(),
+      'is_synced': 0,
+    };
+  }
+
+  List<Map<String, dynamic>> _prepareSaleItems(List<Map<String, dynamic>> products) {
+    return products.map((item) {
+      final productDetails = _lookupsService.productsList.firstWhereOrNull(
+          (p) => p['item_no']?.toString() == item['item_no']?.toString());
+      final int itemCurrencyId = (productDetails?['currency_no'] as num?)?.toInt() ?? 1;
+
+      final itemCurrencyObj = _lookupsService.currenciesList.firstWhereOrNull(
+          (c) => c.currencyNo == itemCurrencyId);
+      final double itemCurrencyRate = itemCurrencyObj?.currencyRate ?? 1.0;
+
+      double calculatedStockBalance = 0.0;
+      try {
+        final List<dynamic> stockList = item['stock_list'] ?? [];
+        final String? selectedExpiry = item['expiry_date'];
+        final String selectedBatchNo = item['batch_no']?.toString() ?? '';
+        final double packFactor = (item['pack_factor'] as num?)?.toDouble() ?? 1.0;
+
+        final matchingBatch = stockList.firstWhereOrNull(
+                (batch) => batch['expiry_date'] == selectedExpiry &&
+                (batch['batch_no']?.toString() ?? '') == selectedBatchNo
+        );
+
+        if (matchingBatch != null) {
+          final double baseQuantity = (matchingBatch['quantity'] as num?)?.toDouble() ?? 0.0;
+          calculatedStockBalance = baseQuantity / (packFactor > 0 ? packFactor : 1.0);
+        }
+      } catch (e) {
+        calculatedStockBalance = 0.0;
+      }
+
+      return {
+        'item_no': item['item_no'].toString(),
+        'quantity': (item['quantity'] as num).toDouble(),
+        'bonus_quantity': (item['bonus_quantity'] as num?)?.toInt() ?? 0,
+        'item_price': (item['item_price'] as num).toDouble(),
+        'cost_price': (item['cost_price'] as num?)?.toDouble() ?? 0.0,
+        'item_discount': (item['item_discount'] as num).toDouble(),
+        'total': (item['total_item'] as num).toDouble(),
+        'created_at': DateTime.now().toIso8601String(),
+        'item_unit': item['item_unit'].toString(),
+        'pack_factor': (item['pack_factor'] as num?)?.toDouble() ?? 1.0,
+        'expiry_date': item['expiry_date'] ?? '',
+        'batch_no': item['batch_no']?.toString() ?? '',
+        'stock_balance': calculatedStockBalance,
+        'item_currency_id': itemCurrencyId,
+        'item_currency_rate': itemCurrencyRate,
+        'pump_name': item['pump_name']?.toString() ?? '',
+        'previous_reading': double.tryParse(item['previous_reading']?.toString() ?? '0') ?? 0.0,
+        'current_reading': double.tryParse(item['current_reading']?.toString() ?? '0') ?? 0.0,
+        'trad_tra_tax': isUtilityModeActive.value
+            ? ((item['trad_tra_tax'] as num?)?.toDouble() ?? 0.0)
+            : 0.0,
+      };
+    }).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _prepareLedgerPostings(List<Map<String, dynamic>> products) async {
+    // لا يوجد حساب افتراضي بديل: كل صنف يجب أن يحمل حسابه الإيرادي (وحساب
+    // التكلفة عند وجود تكلفة له)، وإلا نوقف الحفظ برسالة تحدّد الصنف المشكل.
+    for (final item in products) {
+      final bool hasRevenueAccount =
+          item['sales_revenue_account_id'] != null &&
+          item['sales_revenue_account_id'].toString().trim().isNotEmpty;
+      if (!hasRevenueAccount) {
+        throw Exception('الصنف "${item['item_name']?.toString().trim()}" غير مرتبط بحساب إيرادي. يرجى تصحيح بيانات الصنف.');
+      }
+
+      final double unitCost = (item['cost_price'] as num?)?.toDouble() ?? 0.0;
+      final double qty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
+      final bool needsCogsAccount = (qty * unitCost) > 0;
+      final bool hasCogsAccount =
+          item['cogs_account_id'] != null &&
+          item['cogs_account_id'].toString().trim().isNotEmpty;
+      if (needsCogsAccount && !hasCogsAccount) {
+        throw Exception('الصنف "${item['item_name']?.toString().trim()}" غير مرتبط بحساب تكلفة. يرجى تصحيح بيانات الصنف.');
+      }
+    }
+
+    // أسماء الحسابات تُجلب دفعة واحدة لاستخدامها في حقل [entity_name].
+    final Set<String> accountIds = {};
+    for (final item in products) {
+      accountIds.add(item['sales_revenue_account_id'].toString());
+      if ((item['cogs_account_id'] != null) &&
+          item['cogs_account_id'].toString().trim().isNotEmpty) {
+        accountIds.add(item['cogs_account_id'].toString());
+      }
+    }
+    final Map<String, String> accountNames =
+        await _salesRepository.fetchAccountNameMap(accountIds);
+
+    final selectedCashBoxName = inputController.selectedBox.value;
+    final selectedBoxObject = inputController.boxes.firstWhereOrNull((b) => b.boxName == selectedCashBoxName);
+
+    if (selectedBoxObject == null || selectedBoxObject.accountId == null) {
+      throw Exception('الصندوق غير مرتبط بحساب محاسبي');
+    }
+
+    final inventoryAccountId = inputController.selectedStoreAccountId;
+    if (inventoryAccountId == null) {
+      throw Exception('المخزن المختار غير مرتبط بحساب محاسبي');
+    }
+
+    final cashBoxAccountId = selectedBoxObject.accountId;
+    final mainCurrency = inputController.currencies.firstWhere((c) => c.currencyName == inputController.selectedCurrency.value);
+    final baseExchangeRate = inputController.selectedExchangeRate.value;
+    final netTotalInBase = calculationsController.total.value * baseExchangeRate;
+
+    List<Map<String, dynamic>> postings = [];
+    final beneficiaryName = inputController.customerNameController.text.trim().isEmpty ? '...' : inputController.customerNameController.text.trim();
+    final transactionDate = headerController.selectedDate.value.toIso8601String();
+    final transactionRef = currentInvoiceId.value == null ? '' : headerController.transactionNumber.value;
+
+    final String fixedDescription = 'مقابل فاتورة بيع محطات رقم $transactionRef';
+
+    final double networkAmountInBase = isNetworkSale.value ? (networkPaidAmount * baseExchangeRate) : 0.0;
+    final double cashAmountInBase = netTotalInBase - networkAmountInBase;
+
+    if (isCreditSale.value && isUtilityModeActive.value) {
+      final customer = inputController.selectedCustomer.value;
+      final customerAccountId = customer?.accountId;
+      if (customerAccountId == null || customerAccountId.isEmpty) {
+        throw Exception('العميل "${customer?.customerName ?? ''}" غير مرتبط بحساب محاسبي للبيع الآجل.');
+      }
+
+      postings.add({
+        'account_id': customerAccountId,
+        'debit': netTotalInBase,
+        'credit': 0,
+        'entity_name': customer?.customerName ?? beneficiaryName,
+        'description': fixedDescription,
+        'transaction_date': transactionDate,
+        'transaction_type': 'فاتورة بيع اجل',
+        'transaction_ref': transactionRef,
+        'beneficiary_name': beneficiaryName,
+        'original_amount': calculationsController.total.value,
+        'currency_id': mainCurrency.currencyNo,
+        'exchange_rate': baseExchangeRate,
+        'cost_center_no': null,
+      });
+    } else {
+      if (cashAmountInBase > 0) {
+        postings.add({
+          'account_id': cashBoxAccountId,
+          'debit': cashAmountInBase,
+          'credit': 0,
+          'entity_name': selectedBoxObject.boxName,
+          'description': fixedDescription,
+          'transaction_date': transactionDate,
+          'transaction_type': isUtilityModeActive.value ? 'فاتورة بيع نقدا' : 'فاتورة بيع نقدا',
+          'transaction_ref': transactionRef,
+          'beneficiary_name': beneficiaryName,
+          'original_amount': cashAmountInBase / baseExchangeRate,
+          'currency_id': mainCurrency.currencyNo,
+          'exchange_rate': baseExchangeRate,
+        });
+      }
+
+      if (networkAmountInBase > 0 && selectedNetworkBox.value != null) {
+        postings.add({
+          'account_id': selectedNetworkBox.value!['account_id'].toString(),
+          'debit': networkAmountInBase,
+          'credit': 0,
+          'entity_name': selectedNetworkBox.value!['name'].toString(),
+          'description': fixedDescription + ' (شبكة)',
+          'transaction_date': transactionDate,
+          'transaction_type': isUtilityModeActive.value ? 'فاتورة بيع نقدا' : 'فاتورة بيع نقدا',
+          'transaction_ref': transactionRef,
+          'beneficiary_name': beneficiaryName,
+          'original_amount': networkPaidAmount,
+          'currency_id': mainCurrency.currencyNo,
+          'exchange_rate': baseExchangeRate,
+        });
+      }
+    }
+
+    for (var item in products) {
+      final double itemTotal = (item['total_item'] as num?)?.toDouble() ?? 0.0;
+      final double itemTotalInBase = itemTotal * baseExchangeRate;
+
+      final double qty = (item['quantity'] as num?)?.toDouble() ?? 0.0;
+      final double unitCost = (item['cost_price'] as num?)?.toDouble() ?? 0.0;
+      final double totalItemCost = qty * unitCost;
+      final double totalItemCostInBase = totalItemCost; 
+
+      final itemRevenueAccountId = item['sales_revenue_account_id'].toString();
+      final itemCogsAccountId = item['cogs_account_id'].toString();
+
+      postings.add({
+        'account_id': itemRevenueAccountId,
+        'debit': 0,
+        'credit': itemTotalInBase,
+        'entity_name': accountNames[itemRevenueAccountId] ?? itemRevenueAccountId,
+        'description': fixedDescription,
+        'transaction_date': transactionDate,
+        'transaction_type': 'تحصيل محطات',
+        'transaction_ref': transactionRef,
+        'beneficiary_name': beneficiaryName,
+        'original_amount': itemTotal,
+        'currency_id': mainCurrency.currencyNo,
+        'exchange_rate': baseExchangeRate,
+        'cost_center_no': item['cost_center_no'],
+      });
+
+      if (totalItemCostInBase > 0) {
+        postings.add({
+          'account_id': itemCogsAccountId,
+          'debit': totalItemCostInBase,
+          'credit': 0,
+            'entity_name': accountNames[itemCogsAccountId] ?? itemCogsAccountId,
+          'description': fixedDescription,
+          'transaction_date': transactionDate,
+          'transaction_type': 'تحصيل محطات',
+          'transaction_ref': transactionRef,
+          'beneficiary_name': beneficiaryName,
+          'original_amount': totalItemCost,
+          'currency_id': mainCurrency.currencyNo,
+          'exchange_rate': baseExchangeRate,
+          'cost_center_no': null,
+        });
+
+        postings.add({
+          'account_id': inventoryAccountId,
+          'debit': 0,
+          'credit': totalItemCostInBase,
+          'entity_name': inputController.selectedStore.value,
+          'description': fixedDescription,
+          'transaction_date': transactionDate,
+          'transaction_type': 'تحصيل محطات',
+          'transaction_ref': transactionRef,
+          'beneficiary_name': beneficiaryName,
+          'original_amount': totalItemCost,
+          'currency_id': mainCurrency.currencyNo,
+          'exchange_rate': baseExchangeRate,
+          'cost_center_no': item['cost_center_no'],
+        });
+      }
+    }
+
+    return postings;
+  }
+
+  void resetForm() {
+    productsController.resetProducts();
+    calculationsController.resetCalculations();
+    headerController.resetHeader();
+    inputController.resetDropdowns();
+    currentInvoiceId.value = null;
+    isReadOnly.value = false;
+    headerController.generateAndSetNextTransactionNumber();
+  }
+
+  Future<void> printSale() async {
+    if (!userState.canPrint(_kCurrentScreenName)) {
+      _showUserFriendlyMessage('ليس لديك صلاحية للطباعة.', isError: true);
+      return;
+    }
+
+    if (!isReadOnly.value) {
+      await saveSale(showSuccessMessage: false);
+    }
+
+    if (currentInvoiceId.value == null) return;
+
+    try {
+      final String netTotalInWords = convertNumberToWordsArabic(calculationsController.total.value);
+
+      final String rawCustomerName = inputController.customerNameController.text.trim();
+      final String printCustomerName = rawCustomerName.isEmpty ? '...' : rawCustomerName;
+
+      final String printAccountNo = '';
+
+      final bool? shouldResetForm = await Get.to<bool?>(() => PdfView(
+        saleId: currentInvoiceId.value,
+        transactionNumber: headerController.transactionNumber.value,
+        date: headerController.selectedDate.value,
+        products: productsController.products.where((item) => item['isEmpty'] != true).toList(),
+        total: calculationsController.total.value,
+        tax: 0.0,
+        discount: 0.0,
+        customerName: printCustomerName,
+        accountNo: printAccountNo,
+        storeName: inputController.selectedStore.value,
+        cashBox: inputController.selectedBox.value,
+        currency: inputController.selectedCurrency.value,
+        collector: '',
+        salesRep: '',
+        netTotal: calculationsController.total.value,
+        userName: userState.userName,
+        invoiceTypeChar: 'ت',
+        companyName: _invoiceTemplatesController.companyNameController.text,
+        companyAddress: _invoiceTemplatesController.addressDetailsController.text,
+        contactInfo: _invoiceTemplatesController.contactInfoController.text,
+        thanksMessage: _invoiceTemplatesController.thanksMessageController.text,
+        logoUrl: _invoiceTemplatesController.currentLogoUrl.value,
+        showLogo: _invoiceTemplatesController.showLogo.value,
+        userBranchName: userState.safeUserBranchName,
+        userDepartmentName: userState.safeUserDepartmentName,
+        netTotalInWords: netTotalInWords,
+      ));
+
+      if (shouldResetForm == true) {
+        resetForm();
+      }
+    } catch (e) {
+      _showUserFriendlyMessage('حدث خطأ أثناء محاولة الطباعة.', isError: true);
+    }
+  }
+
+  void navigateToPreviousInvoices() async {
+    if (isReadOnly.value) {
+      _showUserFriendlyMessage('لا يمكن البحث في الفواتير السابقة أثناء عرض فاتورة من السيرفر.', isError: true);
+      return;
+    }
+
+    if (userState.canSearch(_kCurrentScreenName)) {
+      final result = await Get.to(() => const PreviousInvoicesScreen(), arguments: {
+        'invoiceType': isUtilityModeActive.value ? 'ك ن,ك ج' : 'ت'
+      });
+      if (result != null && result is String) {
+        isReadOnly.value = false;
+        _loadInvoiceForEditing(result);
+      }
+    } else {
+      _showUserFriendlyMessage('ليس لديك صلاحية البحث.', isError: true);
+    }
+  }
+
+  bool canPerformAction(String action) {
+    switch (action) {
+      case 'add': return userState.canAdd(_kCurrentScreenName);
+      case 'edit': return userState.canEdit(_kCurrentScreenName);
+      case 'print': return userState.canPrint(_kCurrentScreenName);
+      case 'search':
+        if (isReadOnly.value) return false;
+        return userState.canSearch(_kCurrentScreenName);
+      default: return false;
+    }
+  }
+
+  Future<void> performManualSync() async {
+    if (isManualSyncing.value) return;
+
+    isManualSyncing.value = true;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? savedAddress = prefs.getString('server_address');
+
+      if (savedAddress != null && savedAddress.isNotEmpty) {
+        int syncedCount = 0;
+        if (isUtilityModeActive.value) {
+          final String utilityApiUrl = 'http://$savedAddress/api/Transaction/sync-utility-invoice';
+          syncedCount = await _salesRepository.syncUtilitySalesToRemote(utilityApiUrl, "");
+        } else {
+          final String standardApiUrl = 'http://$savedAddress/api/Transaction/sync-invoice';
+          syncedCount = await _salesRepository.syncSalesToRemote(
+              standardApiUrl,
+              "",
+              invoiceTypeChar: 'ت'
+          );
+        }
+
+        if (syncedCount > 0) {
+          _showUserFriendlyMessage('تمت مزامنة $syncedCount فاتورة بنجاح', isError: false);
+        } else {
+          _showUserFriendlyMessage('لا توجد فواتير غير متزامنة حالياً', isError: false);
+        }
+      }
+    } catch (e) {
+      _showUserFriendlyMessage('فشل الاتصال بالسيرفر', isError: true);
+    } finally {
+      isManualSyncing.value = false;
+    }
+  }
+
+  void _triggerBackgroundSync() {
+    Future.delayed(const Duration(seconds: 2), () async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final String? savedAddress = prefs.getString('server_address');
+
+        if (savedAddress != null && savedAddress.isNotEmpty) {
+          final String standardApiUrl = 'http://$savedAddress/api/Transaction/sync-invoice';
+          final String utilityApiUrl = 'http://$savedAddress/api/Transaction/sync-utility-invoice';
+
+          // Sync standard fuel sales ('ت')
+          await _salesRepository.syncSalesToRemote(
+              standardApiUrl,
+              "",
+              invoiceTypeChar: 'ت'
+          );
+
+          // Sync utility invoices ('ك ن', 'ك ج')
+          await _salesRepository.syncUtilitySalesToRemote(
+              utilityApiUrl,
+              ""
+          );
+
+          await _salesRepository.deleteOldSyncedSales();
+        }
+      } catch (e) {
+      }
+    });
+  }
+}
