@@ -11,6 +11,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../../models/menu_item.dart';
 import '../../repositories/auth_repository.dart';
 import '../../services/lookups_service.dart.dart';
+import '../../services/report_pre_sync_service.dart';
 import '../../user_state.dart';
 import '../../utils/snackbar_helper.dart';
 import '../../utils/trial_period_manager.dart';
@@ -20,6 +21,10 @@ class HomeController extends GetxController {
   final UserState userState = Get.find<UserState>();
   final AuthRepository _authRepository = AuthRepository();
   final LookupsService _lookupsService = Get.find<LookupsService>();
+  final ReportPreSyncService reportPreSyncService =
+      Get.isRegistered<ReportPreSyncService>()
+          ? Get.find<ReportPreSyncService>()
+          : Get.put(ReportPreSyncService());
 
   final companyName = ' '.obs;
   final isLicensed = false.obs;
@@ -75,6 +80,29 @@ class HomeController extends GetxController {
     _checkConnection();
     _checkLicenseStatus();
     _loadBiometricState();
+    _triggerInitialOfflineSync();
+  }
+
+  Future<void> _triggerInitialOfflineSync() async {
+    String year = userState.safeFinancialYearName;
+    if (year == 'غير محددة' || year.isEmpty) {
+      year = DateTime.now().year.toString();
+    }
+    // للأدمن: branchId = null لمزامنة كافة الفروع النشطة و departmentId = null لكافة الأقسام
+    final int? branchId = userState.isAdmin
+        ? null
+        : (userState.safeUserBranch > 0 ? userState.safeUserBranch : null);
+    final int? departmentId = userState.isAdmin
+        ? null
+        : (userState.safeUserDepartment > 0
+            ? userState.safeUserDepartment
+            : null);
+
+    await reportPreSyncService.runInitialOfflineSyncIfNeeded(
+      year: year,
+      branchId: branchId,
+      departmentId: departmentId,
+    );
   }
 
   @override

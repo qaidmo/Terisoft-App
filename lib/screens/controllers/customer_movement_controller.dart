@@ -12,6 +12,7 @@ import '../../models/customer_activity_models.dart';
 import 'package:untitled4/core/database_helper.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import 'dart:convert';
 import 'package:intl/intl.dart';
@@ -165,58 +166,35 @@ class CustomerMovementController extends GetxController {
 
         // _processRawJsonWithIsolate already executed above
       } on OfflineFallbackException catch (e) {
-        String offlineHash = '${DateFormat('yyyy-MM-dd').format(fromDate.value)}|${DateFormat('yyyy-MM-dd').format(toDate.value)}';
-        final cacheResult = await DatabaseHelper.instance.query(
-          'Offline_ReportsCache',
-          columns: ['LastSyncTimestamp', 'file_path', 'ParametersHash'],
-          where: 'ReportType = ? AND CurrencyId = ? AND ParametersHash = ?',
-          whereArgs: ['CustomerActivity', selectedCurrency.value!.currencyNo.toString(), offlineHash]
+        final String offlineHash =
+            '${DateFormat('yyyy-MM-dd').format(fromDate.value)}|${DateFormat('yyyy-MM-dd').format(toDate.value)}';
+        final cached = await OfflineReportQueryService.findCachedReportWithFallback(
+          reportType: 'CustomerActivity',
+          entityId: 'ALL',
+          currencyId: selectedCurrency.value!.currencyNo.toString(),
+          exactParamsHash: offlineHash,
+          year: currentYear,
+          branchId: branchId,
         );
 
-        if (cacheResult.isNotEmpty) {
-          final syncTime = cacheResult.first['LastSyncTimestamp'];
-          final preFilePath = cacheResult.first['file_path']?.toString();
-          String? rawJson = (preFilePath != null && preFilePath.isNotEmpty)
-              ? await ReportCacheFileManager.readReportJson(preFilePath)
-              : null;
-          String lockedDatesRange = cacheResult.first['ParametersHash'].toString();
-          
-          if (lockedDatesRange.contains('|')) {
-             var dates = lockedDatesRange.split('|');
-             if (dates.length == 2) {
-                var d1 = DateTime.tryParse(dates[0]);
-                var d2 = DateTime.tryParse(dates[1]);
-                if (d1 != null && d2 != null) {
-                   lockedDatesRange = '${d1.year}-${d1.month}-${d1.day} إلى ${d2.year}-${d2.month}-${d2.day}';
-                }
-             }
-          }
-
+        if (cached != null) {
           if (e.reason == 'CONNECTION_LOST') {
-            bool proceed = await UiHelper.showOfflineWarningDialog(syncTime.toString(), lockedDateRange: lockedDatesRange);
+            final bool proceed = await UiHelper.showOfflineWarningDialog(
+              cached.lastSyncTimestamp,
+            );
             if (!proceed) {
               isLoading.value = false;
               return;
             }
           }
-
-          // rawJson pre-read above
-          final filePath = cacheResult.first['file_path']?.toString();
-          if (filePath != null && filePath.isNotEmpty && rawJson == null) {
-            rawJson = await ReportCacheFileManager.readReportJson(filePath);
-          }
-          if (rawJson == null || rawJson.isEmpty) {
-            // PayloadJson column removed in v25
-          }
-
-          if (rawJson != null && rawJson.isNotEmpty) {
-            _lastLoadedRawJson = rawJson;
-            await _processRawJsonWithIsolate(rawJson);
-          } else {
-            AppSnackbar.showCustomSnackbar('خطأ', 'ملف التقرير المخزن محلياً غير متاح.', isError: true);
-          }
+          _lastLoadedRawJson = cached.rawJson;
+          await _processRawJsonWithIsolate(cached.rawJson);
         } else {
-          AppSnackbar.showCustomSnackbar('خطأ', 'البيانات المحلية غير متوفرة لهذا النطاق الزمني المحدد. يرجى الاتصال بالإنترنت.', isError: true);
+          AppSnackbar.showCustomSnackbar(
+            'خطأ',
+            'البيانات المحلية غير متوفرة لهذا النطاق الزمني المحدد. يرجى الاتصال بالإنترنت.',
+            isError: true,
+          );
         }
       }
     } catch (e) {

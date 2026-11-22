@@ -243,7 +243,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Widget _buildContactFooter() {
     // ... (هذه الدالة تبقى كما هي بدون تغيير) ...
-    Widget contactItem(IconData icon, String label, VoidCallback onTap) {
+    Widget contactItem(Widget iconWidget, String label, VoidCallback onTap) {
       return InkWell(
         onTap: () {
           HapticFeedback.lightImpact();
@@ -259,7 +259,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 gradient: LinearGradient(colors: [Color(0xFF3A7BDB), Color(0xFF2A5AB5)], begin: Alignment.topLeft, end: Alignment.bottomRight),
                 shape: BoxShape.circle,
               ),
-              child: Icon(icon, color: Colors.white, size: 26),
+              child: iconWidget,
             ),
             const SizedBox(height: 8),
             Text(label, style: const TextStyle(fontSize: 12, color: Colors.black87, fontWeight: FontWeight.w600)),
@@ -275,10 +275,10 @@ class _LoginScreenState extends State<LoginScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
-            contactItem(Icons.call, 'اتصل بنا', () => _launchURL('tel:+967774414409')),
-            contactItem(FontAwesomeIcons.whatsapp, 'وتساب', () => _launchURL('https://wa.me/967774414409')),
-            contactItem(FontAwesomeIcons.facebook, 'فيس بوك', () => _launchURL('https://www.facebook.com/TeraSoftit')),
-            contactItem(Icons.public, 'موقعنا', () => _launchURL('https://terasoftit.net')),
+            contactItem(const Icon(Icons.call, color: Colors.white, size: 26), 'اتصل بنا', () => _launchURL('tel:+967774414409')),
+            contactItem(const FaIcon(FontAwesomeIcons.whatsapp, color: Colors.white, size: 26), 'وتساب', () => _launchURL('https://wa.me/967774414409')),
+            contactItem(const FaIcon(FontAwesomeIcons.facebook, color: Colors.white, size: 26), 'فيس بوك', () => _launchURL('https://www.facebook.com/TeraSoftit')),
+            contactItem(const Icon(Icons.public, color: Colors.white, size: 26), 'موقعنا', () => _launchURL('https://terasoftit.net')),
           ],
         ).animate(delay: 500.ms).fadeIn(duration: 600.ms).moveY(begin: 30, end: 0, curve: Curves.easeOut),
       ],

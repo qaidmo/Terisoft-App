@@ -8,6 +8,7 @@ import 'package:untitled4/repositories/report_repository.dart';
 import 'package:untitled4/repositories/sales_repository.dart';
 import 'package:untitled4/repositories/restaurant_repository.dart';
 import 'package:untitled4/services/api_service.dart';
+import 'package:untitled4/services/report_pre_sync_service.dart';
 import 'package:untitled4/services/sync_service.dart';
 import 'package:untitled4/core//database_helper.dart';
 import 'package:untitled4/repositories/account_repository.dart';
@@ -100,6 +101,7 @@ class CoreServicesBinding extends Bindings {
 
     Get.lazyPut(() => InvoiceTemplatesController(), fenix: true);
     Get.lazyPut(() => LookupsService(), fenix: true);
+    Get.lazyPut(() => ReportPreSyncService(), fenix: true);
   }
 }
 

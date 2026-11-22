@@ -14,6 +14,7 @@ import '../../utils/snackbar_helper.dart';
 import 'package:untitled4/core/database_helper.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import 'package:intl/intl.dart';
 import 'dart:convert';
@@ -178,42 +179,30 @@ class CostCenterReportController extends GetxController {
         // _processRawJsonWithIsolate already executed above
 
       } on OfflineFallbackException catch (e) {
-        final cacheResult = await DatabaseHelper.instance.query(
-          'Offline_ReportsCache',
-          columns: ['LastSyncTimestamp', 'file_path'],
-          where:
-              'ReportType = ? AND EntityIdentifier = ? AND CurrencyId = ? AND ParametersHash = ?',
-          whereArgs: ['CostCenter', entityId, '0', paramHash],
+        final String currentYear =
+            (userState.financialYearName != null &&
+                    userState.financialYearName!.isNotEmpty)
+                ? userState.financialYearName!
+                : startDate.value!.year.toString();
+        final cached = await OfflineReportQueryService.findCachedReportWithFallback(
+          reportType: 'CostCenter',
+          entityId: entityId,
+          currencyId: '0',
+          exactParamsHash: paramHash,
+          year: currentYear,
+          branchId: userState.safeUserBranch,
         );
 
-        if (cacheResult.isNotEmpty) {
-          final syncTime = cacheResult.first['LastSyncTimestamp'].toString();
-          final preFilePath = cacheResult.first['file_path']?.toString();
-          String? rawJson = (preFilePath != null && preFilePath.isNotEmpty)
-              ? await ReportCacheFileManager.readReportJson(preFilePath)
-              : null;
+        if (cached != null) {
           if (e.reason == 'CONNECTION_LOST') {
-            final proceed = await UiHelper.showOfflineWarningDialog(syncTime);
-            if (!proceed) { isLoading.value = false; return; }
+            final proceed =
+                await UiHelper.showOfflineWarningDialog(cached.lastSyncTimestamp);
+            if (!proceed) {
+              isLoading.value = false;
+              return;
+            }
           }
-          // rawJson pre-read above
-          final filePath = cacheResult.first['file_path']?.toString();
-          if (filePath != null && filePath.isNotEmpty && rawJson == null) {
-            rawJson = await ReportCacheFileManager.readReportJson(filePath);
-          }
-          if (rawJson == null || rawJson.isEmpty) {
-            // PayloadJson column removed in v25
-          }
-
-          if (rawJson != null && rawJson.isNotEmpty) {
-            await _processRawJsonWithIsolate(rawJson);
-          } else {
-            AppSnackbar.showCustomSnackbar(
-              'خطأ',
-              'ملف التقرير المخزن محلياً غير متاح.',
-              isError: true,
-            );
-          }
+          await _processRawJsonWithIsolate(cached.rawJson);
         } else {
           AppSnackbar.showCustomSnackbar(
             'خطأ',

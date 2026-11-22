@@ -14,6 +14,7 @@ import '../../models/item_balances_models.dart';
 import 'package:untitled4/core/database_helper.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import 'dart:convert';
 
@@ -233,35 +234,26 @@ class ItemBalancesController extends GetxController {
         }
 
       } on OfflineFallbackException catch (e) {
-        final cacheResult = await DatabaseHelper.instance.query(
-          'Offline_ReportsCache',
-          where: 'ReportType = ? AND CurrencyId = ? AND ParametersHash = ?',
-          whereArgs: ['ItemBalances', '0', paramHash],
+        final cached = await OfflineReportQueryService.findCachedReportWithFallback(
+          reportType: 'ItemBalances',
+          entityId: 'ALL',
+          currencyId: '0',
+          exactParamsHash: paramHash,
+          year: currentYear,
+          branchId: userState.safeUserBranch,
         );
 
-        if (cacheResult.isNotEmpty) {
-          final syncTime = cacheResult.first['LastSyncTimestamp'].toString();
-          final filePath = cacheResult.first['file_path']?.toString();
-          String? rawPayload;
-          if (filePath != null && filePath.isNotEmpty) {
-            rawPayload = await ReportCacheFileManager.readReportPayload(filePath);
-          }
-
+        if (cached != null) {
           if (e.reason == 'CONNECTION_LOST') {
-            final proceed = await UiHelper.showOfflineWarningDialog(syncTime);
-            if (!proceed) { isLoading.value = false; return; }
+            final proceed =
+                await UiHelper.showOfflineWarningDialog(cached.lastSyncTimestamp);
+            if (!proceed) {
+              isLoading.value = false;
+              return;
+            }
           }
-
-          if (rawPayload != null && rawPayload.isNotEmpty) {
-            final response = await compute(parseItemBalancesJson, rawPayload);
-            _applyResponse(response);
-          } else {
-            AppSnackbar.showCustomSnackbar(
-              'خطأ',
-              'ملف الكاش المحلي غير موجود أو تالف.',
-              isError: true,
-            );
-          }
+          final response = await compute(parseItemBalancesJson, cached.rawJson);
+          _applyResponse(response);
         } else {
           AppSnackbar.showCustomSnackbar(
             'خطأ',

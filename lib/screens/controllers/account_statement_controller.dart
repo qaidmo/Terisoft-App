@@ -11,6 +11,7 @@ import 'package:untitled4/utils/snackbar_helper.dart';
 import 'dart:convert';
 import 'package:untitled4/core/database_helper.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import '../../models/account_statement_models.dart';
@@ -289,6 +290,29 @@ class AccountStatementController extends GetxController {
             isLoading.value = false;
             return;
           }
+        }
+
+        // 1. محاولة الاستعلام من جداول SQLite المحلية (يدعم أي فترة زمنية يختارها المستخدم)
+        final sqlResult = await OfflineReportQueryService.queryAccountStatementAsJson(
+          accountId: selectedAccount.value!.id,
+          currencyId: selectedCurrency.value!.currencyNo,
+          branchId: effectiveBranchId,
+          departmentId: effectiveDeptId ?? 0,
+          year: year,
+          fromDate: fromDate.value,
+          toDate: toDate.value,
+        );
+
+        if (sqlResult != null) {
+          if (e.reason == 'CONNECTION_LOST') {
+            bool proceed = await UiHelper.showOfflineWarningDialog(sqlResult.lastSyncTimestamp);
+            if (!proceed) {
+              isLoading.value = false;
+              return;
+            }
+          }
+          await _processOfflineFileInIsolate(sqlResult.rawJson, isOfflineSlicing: false);
+          return;
         }
 
         final cacheResult = await DatabaseHelper.instance.query(

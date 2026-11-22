@@ -14,6 +14,7 @@ import 'package:untitled4/utils/snackbar_helper.dart';
 import '../../models/profit_margin_models.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import 'dart:convert';
 
@@ -296,26 +297,26 @@ class ProfitMarginController extends GetxController {
         }
 
       } on OfflineFallbackException catch (e) {
-        final cacheResult = await DatabaseHelper.instance.query(
-          'Offline_ReportsCache',
-          where: 'ReportType = ? AND CurrencyId = ? AND ParametersHash = ?',
-          whereArgs: ['ProfitMargin', '0', paramHash],
+        final cached = await OfflineReportQueryService.findCachedReportWithFallback(
+          reportType: 'ProfitMargin',
+          entityId: 'ALL',
+          currencyId: '0',
+          exactParamsHash: paramHash,
+          year: currentYear,
+          branchId: userState.safeUserBranch,
         );
 
-        if (cacheResult.isNotEmpty) {
-          final syncTime = cacheResult.first['LastSyncTimestamp'].toString();
-          final storedPath = cacheResult.first['file_path']?.toString() ?? '';
-          final offlineJson = await ReportCacheFileManager.readReportPayload(storedPath);
+        if (cached != null) {
           if (e.reason == 'CONNECTION_LOST') {
-            final proceed = await UiHelper.showOfflineWarningDialog(syncTime);
-            if (!proceed) { isLoading.value = false; return; }
+            final proceed =
+                await UiHelper.showOfflineWarningDialog(cached.lastSyncTimestamp);
+            if (!proceed) {
+              isLoading.value = false;
+              return;
+            }
           }
-          if (offlineJson != null && offlineJson.isNotEmpty) {
-            final offlineData = await compute(parseProfitMarginJson, offlineJson);
-            _applyResponse(offlineData);
-          } else {
-            throw Exception('تعذر قراءة البيانات المحفوظة محلياً');
-          }
+          final offlineData = await compute(parseProfitMarginJson, cached.rawJson);
+          _applyResponse(offlineData);
         } else {
           AppSnackbar.showCustomSnackbar(
             'خطأ',

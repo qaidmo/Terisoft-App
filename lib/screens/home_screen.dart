@@ -39,46 +39,132 @@ class HomeScreen extends StatelessWidget {
           ],
         ),
         drawer: _buildDrawer(context, controller),
-        body: GridView.builder(
-          padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 16,
-            bottom: MediaQuery.of(context).padding.bottom + 16,
-          ),
-          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-            maxCrossAxisExtent: 220,
-            mainAxisSpacing: 16,
-            crossAxisSpacing: 16,
-            mainAxisExtent: 130,
-          ),
-          itemCount: controller.menuItems.length,
-          itemBuilder: (context, index) {
-            final menuItem = controller.menuItems[index];
-
-            return Obx(() {
-              bool canAccess = controller.canAccessScreen(menuItem.screenNameKey);
-
-              Widget cardWidget = Opacity(
-                opacity: canAccess ? 1.0 : 0.4,
-                child: AbsorbPointer(
-                  absorbing: !canAccess,
-                  child: MenuCard(
-                    item: menuItem,
-                    onTap: () => controller.onMenuItemTap(menuItem),
-                  ),
+        body: Column(
+          children: [
+            _buildOfflineSyncBanner(controller),
+            Expanded(
+              child: GridView.builder(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 16,
+                  bottom: MediaQuery.of(context).padding.bottom + 16,
                 ),
-              );
+                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 220,
+                  mainAxisSpacing: 16,
+                  crossAxisSpacing: 16,
+                  mainAxisExtent: 130,
+                ),
+                itemCount: controller.menuItems.length,
+                itemBuilder: (context, index) {
+                  final menuItem = controller.menuItems[index];
 
-              return cardWidget
-                  .animate()
-                  .fade(duration: 400.ms, delay: (index * 50).ms)
-                  .scale(curve: Curves.easeOutBack, delay: (index * 50).ms);
-            });
-          },
+                  return Obx(() {
+                    bool canAccess = controller.canAccessScreen(menuItem.screenNameKey);
+
+                    Widget cardWidget = Opacity(
+                      opacity: canAccess ? 1.0 : 0.4,
+                      child: AbsorbPointer(
+                        absorbing: !canAccess,
+                        child: MenuCard(
+                          item: menuItem,
+                          onTap: () => controller.onMenuItemTap(menuItem),
+                        ),
+                      ),
+                    );
+
+                    return cardWidget
+                        .animate()
+                        .fade(duration: 400.ms, delay: (index * 50).ms)
+                        .scale(curve: Curves.easeOutBack, delay: (index * 50).ms);
+                  });
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );
+  }
+
+  Widget _buildOfflineSyncBanner(HomeController controller) {
+    final syncService = controller.reportPreSyncService;
+    return Obx(() {
+      if (!syncService.isSyncing.value) {
+        return const SizedBox.shrink();
+      }
+      final int percent = (syncService.progress.value * 100).round();
+      return Container(
+        margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEAF3FF),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFF90CAF9)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    syncService.currentTask.value.isNotEmpty
+                        ? syncService.currentTask.value
+                        : 'جاري مزامنة التقارير للعمل بدون إنترنت...',
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF0D47A1),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  '$percent%',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF0D47A1),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                TextButton(
+                  onPressed: syncService.cancelSync,
+                  style: TextButton.styleFrom(
+                    minimumSize: Size.zero,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text(
+                    'إيقاف',
+                    style: TextStyle(fontSize: 12, color: Colors.redAccent),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: syncService.totalItems.value > 0
+                    ? syncService.progress.value
+                    : null,
+                minHeight: 5,
+              ),
+            ),
+          ],
+        ),
+      );
+    });
   }
 
   // ---------------------------------------------------------------------------

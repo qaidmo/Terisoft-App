@@ -10,6 +10,7 @@ import 'package:untitled4/user_state.dart';
 import 'package:untitled4/utils/snackbar_helper.dart';
 import 'package:untitled4/core/database_helper.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -292,11 +293,28 @@ class AccountBalancesController extends GetxController {
             );
           }
         } else {
-          AppSnackbar.showCustomSnackbar(
-            'خطأ',
-            'لا يوجد اتصال بالإنترنت ولا توجد بيانات سابقة محفوظة.',
-            isError: true,
+          final preSynced = await OfflineReportQueryService.queryPreSyncedSummaryCache(
+            reportType: 'AccountBalances',
+            branchId: effectiveBranchId,
+            year: year,
           );
+          if (preSynced != null) {
+            if (e.reason == 'CONNECTION_LOST') {
+              bool proceed = await UiHelper.showOfflineWarningDialog(preSynced.lastSyncTimestamp);
+              if (!proceed) {
+                isLoading.value = false;
+                return;
+              }
+            }
+            _lastLoadedRawJson = preSynced.rawJson;
+            await _processRawJsonWithIsolate(preSynced.rawJson);
+          } else {
+            AppSnackbar.showCustomSnackbar(
+              'خطأ',
+              'لا يوجد اتصال بالإنترنت ولا توجد بيانات سابقة محفوظة.',
+              isError: true,
+            );
+          }
         }
       }
     } catch (e) {

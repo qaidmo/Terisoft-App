@@ -18,6 +18,7 @@ import 'package:flutter/foundation.dart';
 import 'package:untitled4/core/database_helper.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import 'dart:convert';
 
@@ -270,38 +271,25 @@ class SupplierMovementController extends GetxController {
         }
 
       } on OfflineFallbackException catch (e) {
-        final cacheResult = await DatabaseHelper.instance.query(
-          'Offline_ReportsCache',
-          where: 'ReportType = ? AND CurrencyId = ? AND ParametersHash = ?',
-          whereArgs: [
-            'SupplierMovement',
-            selectedCurrency.value!.currencyNo.toString(),
-            paramHash,
-          ],
+        final cached = await OfflineReportQueryService.findCachedReportWithFallback(
+          reportType: 'SupplierMovement',
+          entityId: 'ALL',
+          currencyId: selectedCurrency.value!.currencyNo.toString(),
+          exactParamsHash: paramHash,
+          year: currentYear,
+          branchId: userState.safeUserBranch,
         );
 
-        if (cacheResult.isNotEmpty) {
-          final syncTime = cacheResult.first['LastSyncTimestamp'].toString();
-          String? rawJson;
-          final filePath = cacheResult.first['file_path']?.toString();
-          if (filePath != null && filePath.isNotEmpty) {
-            rawJson = await ReportCacheFileManager.readReportJson(filePath);
-          }
-
+        if (cached != null) {
           if (e.reason == 'CONNECTION_LOST') {
-            final proceed = await UiHelper.showOfflineWarningDialog(syncTime);
-            if (!proceed) { isLoading.value = false; return; }
+            final proceed =
+                await UiHelper.showOfflineWarningDialog(cached.lastSyncTimestamp);
+            if (!proceed) {
+              isLoading.value = false;
+              return;
+            }
           }
-
-          if (rawJson != null && rawJson.isNotEmpty) {
-            await _processRawJsonWithIsolate(rawJson);
-          } else {
-            AppSnackbar.showCustomSnackbar(
-              'خطأ',
-              'ملف التقرير المخزن محلياً غير متاح.',
-              isError: true,
-            );
-          }
+          await _processRawJsonWithIsolate(cached.rawJson);
         } else {
           AppSnackbar.showCustomSnackbar(
             'خطأ',

@@ -15,6 +15,7 @@ import '../../models/sales_movement_models.dart';
 import 'package:untitled4/core/database_helper.dart';
 import 'package:untitled4/services/offline_fallback_exception.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
+import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:flutter/foundation.dart';
@@ -251,28 +252,27 @@ class SalesMovementNewController extends GetxController {
         bool handled = false;
         final String entityIdStr = '${userState.safeUserBranch}_${userState.userDepartment ?? 0}';
         try {
-          final db = await DatabaseHelper.instance.database;
-          final cacheRecords = await db.query(
-            'Offline_ReportsCache',
-            where: 'ReportType = ? AND EntityIdentifier = ? AND CurrencyId = ? AND ParametersHash = ?',
-            whereArgs: ['SalesMovementNew', entityIdStr, '0', paramHash],
-            orderBy: 'LastSyncTimestamp DESC',
-            limit: 1,
+          final cached = await OfflineReportQueryService.findCachedReportWithFallback(
+            reportType: 'SalesMovementNew',
+            entityId: entityIdStr,
+            currencyId: '0',
+            exactParamsHash: paramHash,
+            year: currentYear,
+            branchId: userState.safeUserBranch,
           );
 
-          if (cacheRecords.isNotEmpty) {
-            final filePath = cacheRecords.first['file_path'] as String?;
-            if (filePath != null) {
-              final rawJson = await ReportCacheFileManager.readCacheFile(filePath);
-              if (rawJson != null && rawJson.isNotEmpty) {
-                if (e.reason == 'CONNECTION_LOST') {
-                  final proceed = await UiHelper.showOfflineWarningDialog(cacheRecords.first['LastSyncTimestamp'].toString());
-                  if (!proceed) { isLoading.value = false; return; }
-                }
-                await _processInIsolate(rawJson);
-                handled = true;
+          if (cached != null) {
+            if (e.reason == 'CONNECTION_LOST') {
+              final proceed = await UiHelper.showOfflineWarningDialog(
+                cached.lastSyncTimestamp,
+              );
+              if (!proceed) {
+                isLoading.value = false;
+                return;
               }
             }
+            await _processInIsolate(cached.rawJson);
+            handled = true;
           }
         } catch (err) {
           debugPrint('Error reading SalesMovementNew cache: $err');

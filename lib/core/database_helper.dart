@@ -19,7 +19,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onConfigure: _onConfigure,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
@@ -38,6 +38,9 @@ class DatabaseHelper {
       await db.execute('ALTER TABLE sun_customers ADD COLUMN cost_rsom REAL;');
       await db.execute('ALTER TABLE sales ADD COLUMN tra_srv REAL DEFAULT 0;');
       await db.execute('ALTER TABLE sale_items ADD COLUMN trad_tra_tax REAL DEFAULT 0;');
+    }
+    if (oldVersion < 4) {
+      await _createOfflineReportTables(db);
     }
   }
 
@@ -790,6 +793,97 @@ class DatabaseHelper {
         UserName TEXT,
         TransactionTypeId TEXT,
         TransactionTypeName TEXT
+      )
+    ''');
+
+    await _createOfflineReportTables(db);
+  }
+
+  Future<void> _createOfflineReportTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS offline_ledger_opening_balances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_scope TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        currency_id INTEGER NOT NULL,
+        branch_id INTEGER NOT NULL,
+        department_id INTEGER NOT NULL DEFAULT 0,
+        year TEXT NOT NULL,
+        opening_balance REAL NOT NULL DEFAULT 0,
+        ledger_signature TEXT,
+        last_sync_timestamp TEXT NOT NULL,
+        UNIQUE(report_scope, entity_id, currency_id, branch_id, department_id, year)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS offline_ledger_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_scope TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        currency_id INTEGER NOT NULL,
+        branch_id INTEGER NOT NULL,
+        department_id INTEGER NOT NULL DEFAULT 0,
+        year TEXT NOT NULL,
+        tra_id TEXT,
+        tra_no TEXT,
+        trans_date TEXT NOT NULL,
+        display_date TEXT,
+        trans_type TEXT,
+        description TEXT,
+        beneficiary TEXT,
+        debit REAL NOT NULL DEFAULT 0,
+        credit REAL NOT NULL DEFAULT 0,
+        balance REAL NOT NULL DEFAULT 0
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_offline_ledger_lookup
+      ON offline_ledger_entries(report_scope, entity_id, currency_id, branch_id, department_id, year, trans_date)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS offline_item_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_scope TEXT NOT NULL,
+        item_id TEXT,
+        store_id TEXT,
+        branch_id INTEGER NOT NULL,
+        year TEXT NOT NULL,
+        tra_id TEXT,
+        tra_no TEXT,
+        trans_date TEXT NOT NULL,
+        display_date TEXT,
+        trans_type TEXT,
+        entity_name TEXT,
+        unit_name TEXT,
+        qty_in REAL NOT NULL DEFAULT 0,
+        qty_out REAL NOT NULL DEFAULT 0,
+        price REAL NOT NULL DEFAULT 0,
+        total REAL NOT NULL DEFAULT 0,
+        cost REAL NOT NULL DEFAULT 0,
+        profit REAL NOT NULL DEFAULT 0,
+        extra_json TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_offline_item_mov_lookup
+      ON offline_item_movements(report_scope, item_id, store_id, branch_id, year, trans_date)
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS offline_reports_sync_status (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_type TEXT NOT NULL,
+        branch_id INTEGER NOT NULL DEFAULT 0,
+        year TEXT NOT NULL DEFAULT '',
+        last_sync_at TEXT NOT NULL,
+        total_records INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'completed',
+        error_message TEXT,
+        UNIQUE(report_type, branch_id, year)
       )
     ''');
   }
