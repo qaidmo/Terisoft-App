@@ -71,6 +71,22 @@ class SyncService extends GetxController {
       try {
         final serverAddress = await _getServerAddress();
         if (serverAddress != null && serverAddress.isNotEmpty) {
+          String baseUrl = serverAddress.trim();
+          if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+            baseUrl = 'http://$baseUrl';
+          }
+          while (baseUrl.endsWith('/')) {
+            baseUrl = baseUrl.substring(0, baseUrl.length - 1);
+          }
+
+          // مزامنة سندات القبض والصرف المحلية غير المتزامنة (201 / 202) تلقائياً
+          try {
+            await receiptRepo.syncReceiptsToRemote('$baseUrl/api/Receipt/sync-receipt', '');
+            await receiptRepo.deleteOldSyncedReceipts();
+          } catch (e) {
+            log("Periodic receipt sync error: $e");
+          }
+
           final lastSync = await preferencesService.getLastSyncDate();
           final bool isFirstSync = (lastSync == null || lastSync.isEmpty);
 

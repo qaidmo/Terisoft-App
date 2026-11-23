@@ -19,7 +19,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onConfigure: _onConfigure,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
@@ -41,6 +41,14 @@ class DatabaseHelper {
     }
     if (oldVersion < 4) {
       await _createOfflineReportTables(db);
+    }
+    if (oldVersion < 5) {
+      await _createOfflineReportTables(db);
+      try {
+        await db.execute(
+          "ALTER TABLE offline_ledger_entries ADD COLUMN tra_lst_id TEXT DEFAULT '';",
+        );
+      } catch (_) {}
     }
   }
 
@@ -827,6 +835,7 @@ class DatabaseHelper {
         year TEXT NOT NULL,
         tra_id TEXT,
         tra_no TEXT,
+        tra_lst_id TEXT DEFAULT '',
         trans_date TEXT NOT NULL,
         display_date TEXT,
         trans_type TEXT,

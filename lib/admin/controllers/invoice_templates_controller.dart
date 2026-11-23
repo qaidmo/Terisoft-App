@@ -76,8 +76,8 @@ class InvoiceTemplatesController extends GetxController {
     super.onClose();
   }
 
-  Future<void> fetchInvoiceTemplates() async {
-    if (_invoiceTemplates.isNotEmpty && !isLoading.value) {
+  Future<void> fetchInvoiceTemplates({bool forceRefresh = false}) async {
+    if (!forceRefresh && _invoiceTemplates.isNotEmpty && !isLoading.value) {
       return;
     }
 

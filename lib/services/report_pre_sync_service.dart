@@ -163,12 +163,73 @@ class ReportPreSyncService extends GetxController {
       final items = await db.queryAll('sun_items');
       final costCenters = await db.queryAll('cost_centers');
 
+      final int defaultCurrencyId = currencies.isNotEmpty
+          ? (currencies.first['currency_no'] as num).toInt()
+          : 1;
+
+      // بناء خريطة عملات كل حساب من كافة الجداول المرتبطة لضمان مزامنة كل عملات الحساب أوفلاين
+      final Map<String, Set<int>> accountCurrenciesMap = {};
+      try {
+        final accCurRows = await db.queryAll('sun_account_currencies');
+        for (final row in accCurRows) {
+          final String accId = row['account_id']?.toString().trim() ?? '';
+          final int? cId = (row['currency_id'] as num?)?.toInt();
+          if (accId.isNotEmpty && cId != null && cId > 0) {
+            accountCurrenciesMap.putIfAbsent(accId, () => <int>{}).add(cId);
+          }
+        }
+        final boxCurRows = await db.rawQuery('''
+          SELECT b.account_id, bc.currency_id
+          FROM sun_boxes b
+          JOIN sun_box_currencies bc ON b.box_no = bc.box_no
+          WHERE b.account_id IS NOT NULL
+        ''');
+        for (final row in boxCurRows) {
+          final String accId = row['account_id']?.toString().trim() ?? '';
+          final int? cId = (row['currency_id'] as num?)?.toInt();
+          if (accId.isNotEmpty && cId != null && cId > 0) {
+            accountCurrenciesMap.putIfAbsent(accId, () => <int>{}).add(cId);
+          }
+        }
+        final custCurRows = await db.rawQuery('''
+          SELECT c.account_id, cc.currency_no AS currency_id
+          FROM sun_customers c
+          JOIN sun_customer_currencies cc ON c.customer_no = cc.customer_no
+          WHERE c.account_id IS NOT NULL
+        ''');
+        for (final row in custCurRows) {
+          final String accId = row['account_id']?.toString().trim() ?? '';
+          final int? cId = (row['currency_id'] as num?)?.toInt();
+          if (accId.isNotEmpty && cId != null && cId > 0) {
+            accountCurrenciesMap.putIfAbsent(accId, () => <int>{}).add(cId);
+          }
+        }
+      } catch (_) {}
+
+      // تجهيز قائمة أزواج (حساب + عملة) للمزامنة الكاملة
+      final List<Map<String, dynamic>> accountCurrencyPairs = [];
+      for (final acc in accounts) {
+        final String accountId = acc['id'].toString().trim();
+        final Set<int> linkedCurrencies = accountCurrenciesMap[accountId] ?? <int>{};
+        if (linkedCurrencies.isEmpty) {
+          final int fallbackCur =
+              (acc['default_currency_id'] as num?)?.toInt() ?? defaultCurrencyId;
+          linkedCurrencies.add(fallbackCur);
+        }
+        for (final int cId in linkedCurrencies) {
+          accountCurrencyPairs.add({
+            'accountId': accountId,
+            'currencyId': cId,
+          });
+        }
+      }
+
       final int parsedYear = int.tryParse(year) ?? DateTime.now().year;
       final DateTime yearStart = DateTime(parsedYear, 1, 1);
       final DateTime yearEnd = DateTime(parsedYear, 12, 31, 23, 59, 59);
 
       // حساب إجمالي المهام التقريبي لشريط التقدم
-      final int accountTasksCount = branches.length * accounts.length;
+      final int accountTasksCount = branches.length * accountCurrencyPairs.length;
       final int summaryTasksCount =
           branches.length * (6 + (currencies.length * 2) + costCenters.length);
       final int itemTasksCount = branches.length * items.length;
@@ -389,20 +450,16 @@ class ReportPreSyncService extends GetxController {
           _stepDone();
         }
 
-        // 2. كشوف الحسابات على دفعات (Batching)
-        final int defaultCurrencyId = currencies.isNotEmpty
-            ? (currencies.first['currency_no'] as num).toInt()
-            : 1;
-
-        for (int i = 0; i < accounts.length; i += concurrency) {
+        // 2. كشوف الحسابات على دفعات (Batching) لكل حساب وجميع عملاته المرتبطة
+        for (int i = 0; i < accountCurrencyPairs.length; i += concurrency) {
           if (_cancelRequested) break;
-          final batch = accounts.skip(i).take(concurrency).toList();
-          currentTask.value = 'مزامنة كشوف الحسابات (${i + 1}/${accounts.length})...';
+          final batch = accountCurrencyPairs.skip(i).take(concurrency).toList();
+          currentTask.value =
+              'مزامنة كشوف الحسابات (${i + 1}/${accountCurrencyPairs.length})...';
 
-          await Future.wait(batch.map((acc) async {
-            final String accountId = acc['id'].toString();
-            final int currencyId =
-                (acc['default_currency_id'] as num?)?.toInt() ?? defaultCurrencyId;
+          await Future.wait(batch.map((pair) async {
+            final String accountId = pair['accountId'] as String;
+            final int currencyId = pair['currencyId'] as int;
 
             await _syncAccountLedger(
               baseUrl: baseUrl,
@@ -422,7 +479,7 @@ class ReportPreSyncService extends GetxController {
           reportType: 'AccountStatement',
           branchId: bId,
           year: year,
-          totalRecords: accounts.length,
+          totalRecords: accountCurrencyPairs.length,
           status: _cancelRequested ? 'cancelled' : 'completed',
         );
 
@@ -562,6 +619,10 @@ class ReportPreSyncService extends GetxController {
         final batch = txn.batch();
         for (final tx in txList) {
           final m = tx as Map<String, dynamic>;
+          final String txType = m['type']?.toString() ?? '';
+          // عدم تخزين سطر "رصيد مرحل" المولّد من السيرفر داخل جدول الحركات لتفادي مضاعفة الرصيد الافتتاحي أوفلاين
+          if (txType == 'رصيد مرحل') continue;
+
           final displayDate = m['date']?.toString() ?? '';
           batch.insert('offline_ledger_entries', {
             'report_scope': 'AccountStatement',
@@ -572,9 +633,10 @@ class ReportPreSyncService extends GetxController {
             'year': year,
             'tra_id': m['traId']?.toString() ?? '',
             'tra_no': m['traNo']?.toString() ?? '',
+            'tra_lst_id': (m['traLstId'] ?? m['tra_lst_id'] ?? '').toString(),
             'trans_date': toIsoDateOnly(displayDate),
             'display_date': displayDate,
-            'trans_type': m['type']?.toString() ?? '',
+            'trans_type': txType,
             'description': m['description']?.toString() ?? '',
             'beneficiary': m['beneficiary']?.toString() ?? '',
             'debit': (m['debit'] as num?)?.toDouble() ?? 0.0,

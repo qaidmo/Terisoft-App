@@ -491,10 +491,30 @@ class ReceiptRepository {
     return enrichedReceipts;
   }
 
+  static String _normalizeServerBaseUrl(String rawUrl) {
+    String trimmed = rawUrl.trim();
+    if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+      trimmed = 'http://$trimmed';
+    }
+    while (trimmed.endsWith('/')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    return trimmed;
+  }
+
   Future<int> syncReceiptsToRemote(String apiUrl, String token, {String? invoiceTypeChar}) async {
     if (_isSyncing) return 0;
     _isSyncing = true;
     try {
+      String normalizedApiUrl = apiUrl.trim();
+      if (normalizedApiUrl.startsWith('http://http://')) {
+        normalizedApiUrl = normalizedApiUrl.replaceFirst('http://http://', 'http://');
+      } else if (normalizedApiUrl.startsWith('http://https://')) {
+        normalizedApiUrl = normalizedApiUrl.replaceFirst('http://https://', 'https://');
+      } else if (!normalizedApiUrl.startsWith('http://') && !normalizedApiUrl.startsWith('https://')) {
+        normalizedApiUrl = 'http://$normalizedApiUrl';
+      }
+
       final List<Map<String, dynamic>> enrichedData =
       await fetchUnsyncedCompleteReceipts(invoiceTypeChar: invoiceTypeChar);
 
@@ -518,14 +538,14 @@ class ReceiptRepository {
           log("RECEIPT TO SEND: ${jsonEncode(apiPayload)}");
 
           final response = await http.post(
-            Uri.parse(apiUrl),
+            Uri.parse(normalizedApiUrl),
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $token',
               'Accept': 'application/json',
             },
             body: jsonEncode(apiPayload),
-          );
+          ).timeout(const Duration(seconds: 25));
 
           if (response.statusCode == 200 || response.statusCode == 201) {
             log("Sync Success: ${receiptModel.transactionNumber}");
@@ -570,7 +590,8 @@ class ReceiptRepository {
   }) async {
     try {
       // بناء الرابط مع الباراميترات
-      final Uri uri = Uri.parse('http://$serverUrl/api/Receipt/get-receipt-details').replace(queryParameters: {
+      final String baseUrl = _normalizeServerBaseUrl(serverUrl);
+      final Uri uri = Uri.parse('$baseUrl/api/Receipt/get-receipt-details').replace(queryParameters: {
         'transactionId': transactionId,
         'branchId': branchId.toString(),
         'year': year,
@@ -584,7 +605,7 @@ class ReceiptRepository {
           'Authorization': 'Bearer $token',
           'Accept': 'application/json',
         },
-      );
+      ).timeout(const Duration(seconds: 25));
 
       if (response.statusCode == 200) {
         final Map<String, dynamic> data = jsonDecode(response.body);

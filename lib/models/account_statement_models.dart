@@ -36,9 +36,82 @@ class AccountStatementRequest {
   }
 }
 
+/// خريطة رموز الحركات المعتمدة من جدول SUNUSERSLISTDETAIL / SUNSYSLISTDETAIL في قاعدة DEMO
+const Map<String, String> kSunTransactionTypeNames = {
+  // حركات الموظفين والمرتبات والدوام (018 / 02601)
+  '105': 'قيد استحقاق المرتبات',
+  '01801': 'حسابات الموظفين',
+  '01827': 'اشعار خصم دوام',
+  '01836': 'جزاءات الموظفين',
+  '01837': 'اضافي الدوام',
+  '01851': 'الأجر اليومي',
+  '01855': 'الزيادة والنقص',
+  '01865': 'امر تكليف عمل أضافي',
+  // حركات السلف والعهد (002 / 001)
+  '214': 'طلب سلفة',
+  '215': 'سند صرف عهدة',
+  '106': 'اشعار اخلاء عهدة',
+  // سندات القبض والصرف والنقدية (002)
+  '201': 'سند قبض',
+  '202': 'سند صرف',
+  '203': 'سند قبض نقد داخلي',
+  '204': 'سند صرف نقد داخلي',
+  '221': 'استلام تحويل نقدي من فرع',
+  '222': 'سند تحويل نقدية لفرع',
+  '231': 'سند تحصيل نقدية',
+  '233': 'سند قبض معلقات',
+  '245': 'سند قبض متعدد',
+  // قيود اليومية والإشعارات (001)
+  '101': 'سند قيد يومية',
+  '102': 'اشعار دائن',
+  '103': 'اشعار مدين',
+  '104': 'اشعار خصم',
+  '110': 'سند قيد',
+  '112': 'سند قيد افتتاحي',
+  '113': 'سند قيد تسوية',
+  '114': 'سند قيد فروق عملة',
+  '115': 'سند قيد اقفال',
+  '161': 'قيد استحقاق مدين',
+  '162': 'قيد استحقاق دائن',
+  // الفواتير والمشتريات والمخزون
+  '601': 'فاتورة مبيعات نقدا',
+  '602': 'فاتورة مردود مبيعات نقدا',
+  '603': 'فاتورة مبيعات اجل',
+  '604': 'فاتورة مردود مبيعات اجل',
+  '605': 'فاتورة بيع نقدا',
+  '606': 'فاتورة مردود بيع نقدا',
+  '607': 'فاتورة بيع اجل',
+  '608': 'فاتورة مردود بيع اجل',
+  '633': 'فاتورة مبيعات نقدا معلقة',
+  '634': 'فاتورة مردود مبيعات نقدا معلقة',
+  '421': 'فاتورة مشتريات نقدا',
+  '422': 'فاتورة مردود مشتريات نقدا',
+  '423': 'فاتورة مشتريات اجل',
+  '424': 'فاتورة مردود مشتريات اجل',
+  '505': 'سند صرف مخزني',
+  '506': 'سند توريد مخزني',
+  '801': 'طلبية زبون نقدا',
+  '802': 'مردود طلبية زبون نقدا',
+  '803': 'طلبية زبون اجل',
+  '804': 'مردود طلبية زبون اجل',
+};
+
+String resolveSunTransactionTypeName(String rawType, String traLstId) {
+  final trimmedType = rawType.trim();
+  final trimmedCode = traLstId.trim();
+  if (trimmedType.isNotEmpty && trimmedType != 'نوع غير معروف') {
+    return trimmedType;
+  }
+  if (trimmedCode.isNotEmpty && kSunTransactionTypeNames.containsKey(trimmedCode)) {
+    return kSunTransactionTypeNames[trimmedCode]!;
+  }
+  return trimmedType.isNotEmpty ? trimmedType : trimmedCode;
+}
+
 class StatementTransaction {
   final String traId;
   final String traNo;
+  final String traLstId;
   final String date;
   final String type;
   final String description;
@@ -50,6 +123,7 @@ class StatementTransaction {
   StatementTransaction({
     required this.traId,
     required this.traNo,
+    this.traLstId = '',
     required this.date,
     required this.type,
     required this.description,
@@ -60,11 +134,14 @@ class StatementTransaction {
   });
 
   factory StatementTransaction.fromJson(Map<String, dynamic> json) {
+    final String code = (json['traLstId'] ?? json['tra_lst_id'] ?? '').toString().trim();
+    final String rawType = json['type']?.toString() ?? '';
     return StatementTransaction(
       traId: json['traId']?.toString() ?? '',
       traNo: json['traNo']?.toString() ?? '',
+      traLstId: code,
       date: json['date']?.toString() ?? '',
-      type: json['type']?.toString() ?? '',
+      type: resolveSunTransactionTypeName(rawType, code),
       description: json['description']?.toString() ?? '',
       beneficiary: json['beneficiary']?.toString() ?? '',
       debit: (json['debit'] as num?)?.toDouble() ?? 0.0,
@@ -114,6 +191,7 @@ class StatementRowDisplayModel {
   // 1. البيانات الرقمية والأصلية الخام (Raw & Original Values)
   final String traId;
   final String traNo;
+  final String traLstId;
   final DateTime? parsedDate;
   final String rawDate;
   final String type;
@@ -137,6 +215,7 @@ class StatementRowDisplayModel {
   StatementRowDisplayModel({
     required this.traId,
     required this.traNo,
+    this.traLstId = '',
     required this.parsedDate,
     required this.rawDate,
     required this.type,
@@ -161,6 +240,7 @@ class StatementRowDisplayModel {
     return {
       'traId': traId,
       'traNo': traNo,
+      'traLstId': traLstId,
       'date': dateStr,
       'type': type,
       'description': description,
@@ -316,6 +396,7 @@ StatementProcessingResult isolateProcessAccountStatement(StatementProcessingPara
       displayRows.add(StatementRowDisplayModel(
         traId: tx.traId,
         traNo: tx.traNo,
+        traLstId: tx.traLstId,
         parsedDate: pDate,
         rawDate: tx.date,
         type: tx.type,
@@ -363,6 +444,7 @@ StatementProcessingResult isolateProcessAccountStatement(StatementProcessingPara
         displayRows.add(StatementRowDisplayModel(
           traId: tx.traId,
           traNo: tx.traNo.isNotEmpty ? tx.traNo : '0',
+          traLstId: tx.traLstId,
           parsedDate: pDate,
           rawDate: tx.date,
           type: tx.type,
@@ -389,6 +471,7 @@ StatementProcessingResult isolateProcessAccountStatement(StatementProcessingPara
         displayRows.add(StatementRowDisplayModel(
           traId: tx.traId,
           traNo: tx.traNo,
+          traLstId: tx.traLstId,
           parsedDate: pDate,
           rawDate: tx.date,
           type: tx.type,

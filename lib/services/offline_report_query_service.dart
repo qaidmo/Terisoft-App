@@ -57,7 +57,7 @@ class OfflineReportQueryService {
     final String fromIso = _toIsoDate(fromDate);
     final String toIso = _toIsoDate(toDate);
 
-    // 1. حساب الرصيد الافتتاحي للفترة = رصيد بداية السنة + صافي الحركات قبل fromDate
+    // 1. حساب الرصيد الافتتاحي للفترة = رصيد بداية السنة + صافي الحركات قبل fromDate (مع استثناء أي سطر رصيد مرحل قديم)
     final priorSumRows = await db.rawQuery(
       '''
       SELECT COALESCE(SUM(debit - credit), 0) AS prior_net
@@ -68,6 +68,7 @@ class OfflineReportQueryService {
         AND branch_id = ?
         AND department_id = ?
         AND year = ?
+        AND trans_type != 'رصيد مرحل'
         AND trans_date < ?
       ''',
       ['AccountStatement', accountId, currencyId, branchId, departmentId, year, fromIso],
@@ -81,7 +82,7 @@ class OfflineReportQueryService {
     // 2. جلب حركات الفترة المطلوبة مرتبة زمنياً
     final txRows = await db.rawQuery(
       '''
-      SELECT tra_id, tra_no, display_date, trans_type, description, beneficiary, debit, credit
+      SELECT tra_id, tra_no, tra_lst_id, display_date, trans_type, description, beneficiary, debit, credit
       FROM offline_ledger_entries
       WHERE report_scope = ?
         AND entity_id = ?
@@ -89,6 +90,7 @@ class OfflineReportQueryService {
         AND branch_id = ?
         AND department_id = ?
         AND year = ?
+        AND trans_type != 'رصيد مرحل'
         AND trans_date BETWEEN ? AND ?
       ORDER BY trans_date ASC, id ASC
       ''',
@@ -100,6 +102,24 @@ class OfflineReportQueryService {
     double totalPeriodCredit = 0.0;
 
     final List<Map<String, dynamic>> transactions = [];
+    if (periodOpeningBalance != 0) {
+      final DateTime carriedDate = fromDate.subtract(const Duration(days: 1));
+      final String carriedDateStr =
+          '${carriedDate.day.toString().padLeft(2, '0')}/${carriedDate.month.toString().padLeft(2, '0')}/${carriedDate.year}';
+      transactions.add({
+        'traId': '',
+        'traNo': '0',
+        'traLstId': '',
+        'date': carriedDateStr,
+        'type': 'رصيد مرحل',
+        'description': 'رصيد مرحل',
+        'beneficiary': '',
+        'debit': periodOpeningBalance > 0 ? periodOpeningBalance : 0.0,
+        'credit': periodOpeningBalance < 0 ? periodOpeningBalance.abs() : 0.0,
+        'balance': periodOpeningBalance,
+      });
+    }
+
     for (final row in txRows) {
       final double debit = (row['debit'] as num?)?.toDouble() ?? 0.0;
       final double credit = (row['credit'] as num?)?.toDouble() ?? 0.0;
@@ -110,6 +130,7 @@ class OfflineReportQueryService {
       transactions.add({
         'traId': row['tra_id']?.toString() ?? '',
         'traNo': row['tra_no']?.toString() ?? '',
+        'traLstId': row['tra_lst_id']?.toString() ?? '',
         'date': row['display_date']?.toString() ?? '',
         'type': row['trans_type']?.toString() ?? '',
         'description': row['description']?.toString() ?? '',

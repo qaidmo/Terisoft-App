@@ -756,6 +756,17 @@ class CashPaymentController extends GetxController {
     }
   }
 
+  String _buildReceiptSyncUrl(String savedAddress) {
+    String base = savedAddress.trim();
+    if (!base.startsWith('http://') && !base.startsWith('https://')) {
+      base = 'http://$base';
+    }
+    while (base.endsWith('/')) {
+      base = base.substring(0, base.length - 1);
+    }
+    return '$base/api/Receipt/sync-receipt';
+  }
+
   Future<void> performManualSync() async {
     if (isManualSyncing.value) return;
 
@@ -766,7 +777,7 @@ class CashPaymentController extends GetxController {
       final String? savedAddress = prefs.getString('server_address');
 
       if (savedAddress != null && savedAddress.isNotEmpty) {
-        final String fullApiUrl = 'http://$savedAddress/api/Receipt/sync-receipt';
+        final String fullApiUrl = _buildReceiptSyncUrl(savedAddress);
 
         final int syncedCount = await _receiptRepository.syncReceiptsToRemote(
             fullApiUrl,
@@ -795,7 +806,7 @@ class CashPaymentController extends GetxController {
         final String? savedAddress = prefs.getString('server_address');
 
         if (savedAddress != null && savedAddress.isNotEmpty) {
-          final String fullApiUrl = 'http://$savedAddress/api/Receipt/sync-receipt';
+          final String fullApiUrl = _buildReceiptSyncUrl(savedAddress);
 
           await _receiptRepository.syncReceiptsToRemote(
               fullApiUrl,

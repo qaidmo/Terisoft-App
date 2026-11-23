@@ -365,7 +365,7 @@ class AccountStatementScreen extends StatelessWidget {
                     padding: EdgeInsets.zero,
                     itemBuilder: (context, index) {
                       final row = controller.statementRows[index];
-                      return _buildTableRow(index, row, rowHeight);
+                      return _buildTableRow(index, row, rowHeight, controller);
                     },
                   ),
                 ),
@@ -402,59 +402,63 @@ class AccountStatementScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildTableRow(int index, StatementRowDisplayModel row, double height) {
+  Widget _buildTableRow(
+      int index, StatementRowDisplayModel row, double height, AccountStatementController controller) {
     final isEven = index % 2 == 0;
     final isCarriedForward = row.type == 'رصيد مرحل';
     final isNegativeBalance = row.balance < 0;
 
-    return Container(
-      height: height,
-      decoration: BoxDecoration(
-        color: isCarriedForward
-            ? Colors.amber.shade50
-            : (isEven ? Colors.white : Colors.grey.shade50),
-        border: Border(
-          bottom: BorderSide(color: Colors.grey.shade300, width: 0.8),
+    return InkWell(
+      onTap: isCarriedForward ? null : () => controller.onStatementRowTap(row),
+      child: Container(
+        height: height,
+        decoration: BoxDecoration(
+          color: isCarriedForward
+              ? Colors.amber.shade50
+              : (isEven ? Colors.white : Colors.grey.shade50),
+          border: Border(
+            bottom: BorderSide(color: Colors.grey.shade300, width: 0.8),
+          ),
         ),
-      ),
-      child: Row(
-        children: [
-          _buildDataCell(row.index.toString(), 45.0, alignment: Alignment.center),
-          _buildDataCell(
-            row.debitStr,
-            100.0,
-            alignment: Alignment.centerRight,
-            style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.black87),
-          ),
-          _buildDataCell(
-            row.creditStr,
-            100.0,
-            alignment: Alignment.centerRight,
-            style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.black87),
-          ),
-          _buildDataCell(
-            row.balanceStr,
-            115.0,
-            alignment: Alignment.centerRight,
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              color: isNegativeBalance ? Colors.red.shade700 : Colors.green.shade800,
+        child: Row(
+          children: [
+            _buildDataCell(row.index.toString(), 45.0, alignment: Alignment.center),
+            _buildDataCell(
+              row.debitStr,
+              100.0,
+              alignment: Alignment.centerRight,
+              style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.black87),
             ),
-          ),
-          _buildDataCell(row.dateStr, 95.0, alignment: Alignment.center),
-          _buildDataCell(row.traNoStr, 85.0, alignment: Alignment.center),
-          _buildDataCell(
-            row.typeStr,
-            95.0,
-            alignment: Alignment.center,
-            style: TextStyle(
-              color: isCarriedForward ? Colors.amber.shade900 : Colors.black87,
-              fontWeight: isCarriedForward ? FontWeight.bold : FontWeight.normal,
+            _buildDataCell(
+              row.creditStr,
+              100.0,
+              alignment: Alignment.centerRight,
+              style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.black87),
             ),
-          ),
-          _buildDataCell(row.beneficiaryStr, 140.0, alignment: Alignment.centerRight),
-          _buildDataCell(row.descriptionStr, 225.0, alignment: Alignment.centerRight),
-        ],
+            _buildDataCell(
+              row.balanceStr,
+              115.0,
+              alignment: Alignment.centerRight,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: isNegativeBalance ? Colors.red.shade700 : Colors.green.shade800,
+              ),
+            ),
+            _buildDataCell(row.dateStr, 95.0, alignment: Alignment.center),
+            _buildDataCell(row.traNoStr, 85.0, alignment: Alignment.center),
+            _buildDataCell(
+              row.typeStr,
+              95.0,
+              alignment: Alignment.center,
+              style: TextStyle(
+                color: isCarriedForward ? Colors.amber.shade900 : Colors.black87,
+                fontWeight: isCarriedForward ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+            _buildDataCell(row.beneficiaryStr, 140.0, alignment: Alignment.centerRight),
+            _buildDataCell(row.descriptionStr, 225.0, alignment: Alignment.centerRight),
+          ],
+        ),
       ),
     );
   }

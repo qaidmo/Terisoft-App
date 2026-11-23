@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:untitled4/models/sun_account_model.dart';
 import 'package:untitled4/models/sun_currency.dart';
 import 'package:untitled4/repositories/lookups_repository.dart';
@@ -15,6 +16,8 @@ import 'package:untitled4/services/offline_report_query_service.dart';
 import 'package:untitled4/services/report_cache_file_manager.dart';
 import 'package:untitled4/utils/ui_helper.dart';
 import '../../models/account_statement_models.dart';
+import '../cash_payment_voucher_screen.dart';
+import '../cash_receipt_voucher_screen.dart';
 import '../pdf_statement/statement_pdf_view.dart';
 
 class AccountStatementController extends GetxController {
@@ -56,6 +59,7 @@ class AccountStatementController extends GetxController {
     final now = DateTime.now();
     fromDate = DateTime(now.year, now.month, 1).obs;
     toDate = DateTime(now.year, now.month + 1, 0).obs;
+    _invoiceTemplatesController.fetchInvoiceTemplates();
     loadAllAccounts();
     _loadBranches();
     _loadDepartments();
@@ -180,6 +184,7 @@ class AccountStatementController extends GetxController {
   }
 
   String? _lastIsolateLedgerSignature;
+  String? _lastLoadedFilterKey;
 
   void onCurrencySelected(SunCurrency? currency) {
     selectedCurrency.value = currency;
@@ -214,6 +219,8 @@ class AccountStatementController extends GetxController {
 
       // ParametersHash for cache — same value used in both write and read
       final String parametersHash = _buildParametersHash(effectiveBranchId, effectiveDeptId);
+      final String currentFilterKey =
+          '${selectedAccount.value!.id}_${selectedCurrency.value!.currencyNo}_${parametersHash}_${fromDate.value.toIso8601String().substring(0, 10)}_${toDate.value.toIso8601String().substring(0, 10)}';
 
       try {
         final result = await _reportRepository.getAccountStatementWithCache(
@@ -240,6 +247,7 @@ class AccountStatementController extends GetxController {
             statementRows.clear();
             await _processOfflineFileInIsolate(rawJson, isOfflineSlicing: false);
             ledgerSignature = _lastIsolateLedgerSignature;
+            _lastLoadedFilterKey = currentFilterKey;
           } catch (_) {
             ledgerSignature = null;
           }
@@ -282,11 +290,12 @@ class AccountStatementController extends GetxController {
         if (response != null) {
           statementRows.clear();
           await _processOfflineFileInIsolate(rawJson, isOfflineSlicing: false);
+          _lastLoadedFilterKey = currentFilterKey;
         }
       } on OfflineFallbackException catch (e) {
-        // --- NOT_MODIFIED: Data is unchanged on server.
+        // --- NOT_MODIFIED: Data is unchanged on server for the exact same filter & date range.
         if (e.reason == 'NOT_MODIFIED') {
-          if (statementRows.isNotEmpty) {
+          if (statementRows.isNotEmpty && _lastLoadedFilterKey == currentFilterKey) {
             isLoading.value = false;
             return;
           }
@@ -434,7 +443,121 @@ class AccountStatementController extends GetxController {
     closingBalance.value = 0.0;
   }
 
-  void printStatement() {
+  void onStatementRowTap(StatementRowDisplayModel row) {
+    if (row.type == 'رصيد مرحل') return;
+
+    final String code = row.traLstId.trim();
+    final String typeText = row.type.trim();
+
+    final bool isReceiptVoucher = code == '201' || (code.isEmpty && typeText == 'سند قبض');
+    final bool isPaymentVoucher = code == '202' || (code.isEmpty && typeText == 'سند صرف');
+
+    final int effectiveBranchId =
+        (selectedBranch.value?['branch_id'] as int?) ?? userState.safeUserBranch;
+    String year = userState.safeFinancialYearName;
+    if (year == 'غير محددة' || year.isEmpty) {
+      year = fromDate.value.year.toString();
+    }
+
+    if (isReceiptVoucher && row.traId.isNotEmpty) {
+      Get.to(
+        () => ReceiptScreen(receiptId: int.tryParse(row.traId)),
+        arguments: {
+          'transactionId': row.traId,
+          'isRemote': true,
+          'remoteBranchId': effectiveBranchId,
+          'remoteYear': year,
+        },
+      );
+      return;
+    }
+
+    if (isPaymentVoucher && row.traId.isNotEmpty) {
+      Get.to(
+        () => CashPaymentVoucherScreen(paymentId: int.tryParse(row.traId)),
+        arguments: {
+          'transactionId': row.traId,
+          'isRemote': true,
+          'remoteBranchId': effectiveBranchId,
+          'remoteYear': year,
+        },
+      );
+      return;
+    }
+
+    // عرض تفاصيل الحركة (حركات الموظفين والسلف 105 / 214 / 215 / 106 والقيود والفواتير)
+    Get.dialog(
+      AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: Row(
+          children: [
+            const Icon(Icons.receipt_long_outlined, color: Colors.blueGrey),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                row.typeStr.isNotEmpty ? row.typeStr : 'تفاصيل الحركة',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (code.isNotEmpty) _buildDetailLine('رمز الحركة:', code),
+              _buildDetailLine('رقم الحركة:', row.traNoStr),
+              _buildDetailLine('التاريخ:', row.dateStr),
+              if (row.beneficiaryStr.isNotEmpty)
+                _buildDetailLine('المستفيد:', row.beneficiaryStr),
+              if (row.debit > 0) _buildDetailLine('مدين:', row.debitStr),
+              if (row.credit > 0) _buildDetailLine('دائن:', row.creditStr),
+              _buildDetailLine('الرصيد:', row.balanceStr),
+              if (row.descriptionStr.isNotEmpty) ...[
+                const Divider(),
+                const Text(
+                  'البيان:',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                ),
+                const SizedBox(height: 4),
+                Text(row.descriptionStr, style: const TextStyle(fontSize: 13)),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Get.back(),
+            child: const Text('إغلاق'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDetailLine(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 90,
+            child: Text(
+              label,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+          ),
+          Expanded(
+            child: Text(value, style: const TextStyle(fontSize: 13)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> printStatement() async {
     if (statementRows.isEmpty ||
         selectedAccount.value == null ||
         selectedCurrency.value == null) {
@@ -444,8 +567,36 @@ class AccountStatementController extends GetxController {
       return;
     }
 
+    await _invoiceTemplatesController.fetchInvoiceTemplates();
     _invoiceTemplatesController.selectTemplate('AccountStatementScreen');
-    if (_invoiceTemplatesController.companyNameController.text.isEmpty) {
+
+    if (_invoiceTemplatesController.companyNameController.text.trim().isEmpty) {
+      await _invoiceTemplatesController.fetchInvoiceTemplates(forceRefresh: true);
+      _invoiceTemplatesController.selectTemplate('AccountStatementScreen');
+    }
+
+    // في حال كان قالب كشف الحساب محفوظاً باسم شركة فارغ بينما قوالب الفواتير/السندات مضبوطة
+    if (_invoiceTemplatesController.companyNameController.text.trim().isEmpty) {
+      for (final fallbackScreen in const [
+        'CashSaleScreen',
+        'ReceiptScreen',
+        'CashPaymentVoucherScreen',
+      ]) {
+        _invoiceTemplatesController.selectTemplate(fallbackScreen);
+        if (_invoiceTemplatesController.companyNameController.text.trim().isNotEmpty) {
+          break;
+        }
+      }
+    }
+
+    if (_invoiceTemplatesController.companyNameController.text.trim().isEmpty) {
+      final prefs = await SharedPreferences.getInstance();
+      final savedName = prefs.getString('saved_company_name')?.trim() ?? '';
+      _invoiceTemplatesController.companyNameController.text =
+          savedName.isNotEmpty ? savedName : userState.safeUserBranchName;
+    }
+
+    if (_invoiceTemplatesController.companyNameController.text.trim().isEmpty) {
       AppSnackbar.showCustomSnackbar('خطأ',
           'لا يمكن تحميل إعدادات قالب الطباعة، يرجى التأكد من ضبط القوالب في الإعدادات.',
           isError: true);

@@ -155,9 +155,16 @@ class SyncView extends StatelessWidget {
                                       }
                                       reportSyncService.syncAllReportsForOffline(
                                         year: year,
-                                        branchId: userState.safeUserBranch > 0
-                                            ? userState.safeUserBranch
-                                            : null,
+                                        branchId: userState.isAdmin
+                                            ? null
+                                            : (userState.safeUserBranch > 0
+                                                ? userState.safeUserBranch
+                                                : null),
+                                        departmentId: userState.isAdmin
+                                            ? null
+                                            : (userState.safeUserDepartment > 0
+                                                ? userState.safeUserDepartment
+                                                : null),
                                       );
                                     }
                                   },
