@@ -324,16 +324,22 @@ class AccountStatementController extends GetxController {
           return;
         }
 
-        final cacheResult = await DatabaseHelper.instance.query(
-          'Offline_ReportsCache',
-          where: 'ReportType = ? AND EntityIdentifier = ? AND CurrencyId = ? AND ParametersHash = ?',
-          whereArgs: [
-            'AccountStatement',
-            selectedAccount.value!.id,
-            selectedCurrency.value!.currencyNo.toString(),
-            parametersHash,
-          ]
-        );
+        List<Map<String, dynamic>> cacheResult = const [];
+        try {
+          cacheResult = await DatabaseHelper.instance.query(
+            'Offline_ReportsCache',
+            where: 'ReportType = ? AND EntityIdentifier = ? AND CurrencyId = ? AND ParametersHash = ?',
+            whereArgs: [
+              'AccountStatement',
+              selectedAccount.value!.id,
+              selectedCurrency.value!.currencyNo.toString(),
+              parametersHash,
+            ],
+            orderBy: 'Id DESC',
+          );
+        } catch (cacheErr) {
+          debugPrint('⚠️ Ignored offline cache query error: $cacheErr');
+        }
 
         if (cacheResult.isNotEmpty) {
           final syncTime = cacheResult.first['LastSyncTimestamp'];
@@ -356,12 +362,41 @@ class AccountStatementController extends GetxController {
 
           if (rawJson != null && rawJson.isNotEmpty) {
             await _processOfflineFileInIsolate(rawJson);
-          } else {
-            AppSnackbar.showCustomSnackbar('خطأ', 'تعذر قراءة ملف كاش كشف الحساب المحلي.', isError: true);
+            return;
           }
-        } else {
-          AppSnackbar.showCustomSnackbar('خطأ', 'لا يوجد اتصال بالإنترنت ولا توجد بيانات سابقة محفوظة لهذا الحساب.', isError: true);
         }
+
+        try {
+          final fallbackCached = await OfflineReportQueryService.findCachedReportWithFallback(
+            reportType: 'AccountStatement',
+            currencyId: selectedCurrency.value!.currencyNo.toString(),
+            exactParamsHash: parametersHash,
+            entityId: selectedAccount.value!.id,
+            year: year,
+            branchId: effectiveBranchId,
+          );
+          if (fallbackCached != null && fallbackCached.rawJson.isNotEmpty) {
+            if (e.reason == 'CONNECTION_LOST') {
+              bool proceed = await UiHelper.showOfflineWarningDialog(fallbackCached.lastSyncTimestamp);
+              if (!proceed) {
+                isLoading.value = false;
+                return;
+              }
+            }
+            await _processOfflineFileInIsolate(fallbackCached.rawJson);
+            return;
+          }
+        } catch (fbErr) {
+          debugPrint('⚠️ Ignored fallback cache lookup error: $fbErr');
+        }
+
+        AppSnackbar.showCustomSnackbar(
+          'خطأ',
+          cacheResult.isNotEmpty
+              ? 'تعذر قراءة ملف كاش كشف الحساب المحلي.'
+              : 'لا يوجد اتصال بالإنترنت ولا توجد بيانات سابقة محفوظة لهذا الحساب.',
+          isError: true,
+        );
       }
     } catch (e) {
       if (e is! OfflineFallbackException) {

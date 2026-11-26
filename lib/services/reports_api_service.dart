@@ -11,7 +11,6 @@ import '../models/cost_center_report_models.dart';
 import '../models/sales_movement_models.dart';
 import '../models/account_balances_models.dart';
 import '../models/cost_center_profit_margin_models.dart';
-import '../core/database_helper.dart';
 import 'offline_fallback_exception.dart';
 import 'server_connectivity.dart';
 
@@ -177,42 +176,13 @@ class ReportsApiService {
   }
 
   // ---------------------------------------------------------------------------
-  // 1. Account Statement (With Cache & Delta)
+  // 1. Account Statement (Direct 200 OK Online + Instant Offline Fallback)
   // ---------------------------------------------------------------------------
   Future<(AccountStatementResponse?, String)> fetchAccountStatementWithCache(AccountStatementRequest request) async {
     final String baseUrl = await _getBaseUrl();
-    final Uri url = Uri.parse('$baseUrl/api/ReportsSync/delta-account-statement');
+    final Uri url = Uri.parse('$baseUrl/api/Reports/account-statement');
 
     try {
-      final dbHelper = DatabaseHelper.instance;
-      // Build the same ParametersHash used by the controller
-      final String parametersHash = 'B${request.branchId}_D${request.departmentId ?? 0}';
-
-      final cacheResult = await dbHelper.query(
-        'Offline_ReportsCache',
-        columns: ['LastSyncTimestamp', 'ledger_signature', 'file_path'],
-        where: 'ReportType = ? AND EntityIdentifier = ? AND CurrencyId = ? AND ParametersHash = ?',
-        whereArgs: [
-          'AccountStatement',
-          request.accountId,
-          request.currencyId.toString(),
-          parametersHash,
-        ]
-      );
-      
-      String lastSyncTime = '2000-01-01T00:00:00.000Z';
-      String? ledgerSignature;
-      if (cacheResult.isNotEmpty) {
-        lastSyncTime = cacheResult.first['LastSyncTimestamp']?.toString() ?? '2000-01-01T00:00:00.000Z';
-        ledgerSignature = cacheResult.first['ledger_signature']?.toString();
-      }
-
-      var requestJson = request.toJson();
-      requestJson['lastSyncTimestamp'] = lastSyncTime;
-      if (ledgerSignature != null && ledgerSignature.isNotEmpty && ledgerSignature != '2000-01-01T00:00:00.000Z') {
-        requestJson['ledgerSignature'] = ledgerSignature;
-      }
-
       await ServerConnectivity.ensureServerReachable();
       final response = await ServerConnectivity.client.post(
         url,
@@ -220,18 +190,16 @@ class ReportsApiService {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
-        body: jsonEncode(requestJson),
-      ).timeout(const Duration(seconds: 30)); 
+        body: jsonEncode(request.toJson()),
+      ).timeout(const Duration(seconds: 30));
 
       if (response.statusCode == 200) {
         // Return raw JSON string directly — the controller will parse + process
         // in a single compute() isolate, avoiding double-isolate overhead.
         return (null, response.body);
-      } else if (response.statusCode == 304) {
-        throw OfflineFallbackException('NOT_MODIFIED');
       } else {
         _handleError(response);
-        throw Exception('Unreachable'); 
+        throw Exception('Unreachable');
       }
 
     } on TimeoutException {

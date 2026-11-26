@@ -499,44 +499,60 @@ class LookupsRepository {
 
   Future<List<SunCurrency>> fetchCurrenciesForAccount(String accountId) async {
     const accSql = '''
-    SELECT c.* FROM sun_currencies c
-    JOIN sun_account_currencies ac ON c.currency_no = ac.currency_id
-    WHERE ac.account_id = ?
-  ''';
+      SELECT c.* FROM sun_currencies c
+      JOIN sun_account_currencies ac ON c.currency_no = ac.currency_id
+      WHERE ac.account_id = ?
+    ''';
     final accResult = await _dbHelper.rawQuery(accSql, [accountId]);
-
     if (accResult.isNotEmpty) {
       return accResult.map((e) => SunCurrency.fromJson(e)).toList();
     }
 
-    int? boxNo = int.tryParse(accountId);
-
-    if (boxNo != null) {
-      const boxSql = '''
-      SELECT c.* FROM sun_currencies c
+    const boxSql = '''
+      SELECT DISTINCT c.* FROM sun_currencies c
       JOIN sun_box_currencies bc ON c.currency_no = bc.currency_id
-      WHERE bc.box_no = ?
+      LEFT JOIN sun_boxes b ON b.box_no = bc.box_no
+      WHERE b.account_id = ? OR CAST(bc.box_no AS TEXT) = ?
     ''';
-      final boxResult = await _dbHelper.rawQuery(boxSql, [boxNo]);
-
-      if (boxResult.isNotEmpty) {
-        return boxResult.map((e) => SunCurrency.fromJson(e)).toList();
-      }
-    return [];
-  }
-
-    final List<Map<String, dynamic>> customerCheck = await _dbHelper.query(
-        'sun_customers',
-        columns: ['customer_no'],
-        where: 'account_id = ?',
-        whereArgs: [accountId]
-    );
-
-    if (customerCheck.isNotEmpty) {
-      return await fetchCurrenciesForCustomer(customerCheck.first['customer_no'] as int);
+    final boxResult = await _dbHelper.rawQuery(boxSql, [accountId, accountId]);
+    if (boxResult.isNotEmpty) {
+      return boxResult.map((e) => SunCurrency.fromJson(e)).toList();
     }
 
-    return [];
+    final List<Map<String, dynamic>> customerCheck = await _dbHelper.query(
+      'sun_customers',
+      columns: ['customer_no'],
+      where: 'account_id = ?',
+      whereArgs: [accountId],
+    );
+    if (customerCheck.isNotEmpty) {
+      final custCurrencies =
+          await fetchCurrenciesForCustomer(customerCheck.first['customer_no'] as int);
+      if (custCurrencies.isNotEmpty) {
+        return custCurrencies;
+      }
+    }
+
+    final List<Map<String, dynamic>> parentCheck = await _dbHelper.query(
+      'sun_account',
+      columns: ['parent_id'],
+      where: 'id = ?',
+      whereArgs: [accountId],
+    );
+    if (parentCheck.isNotEmpty) {
+      final String? parentId = parentCheck.first['parent_id']?.toString();
+      if (parentId != null && parentId.isNotEmpty) {
+        final parentResult = await _dbHelper.rawQuery(accSql, [parentId]);
+        if (parentResult.isNotEmpty) {
+          return parentResult.map((e) => SunCurrency.fromJson(e)).toList();
+        }
+      }
+    }
+
+    final fallbackCurrencies = await _dbHelper.rawQuery(
+      'SELECT * FROM sun_currencies ORDER BY currency_no ASC',
+    );
+    return fallbackCurrencies.map((e) => SunCurrency.fromJson(e)).toList();
   }
 
   Future<List<SunCurrency>> fetchCurrenciesForCustomer(int customerNo) async {

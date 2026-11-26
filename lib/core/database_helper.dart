@@ -19,10 +19,11 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onConfigure: _onConfigure,
       onCreate: _createDB,
       onUpgrade: _onUpgrade,
+      onOpen: _onOpen,
     );
   }
 
@@ -50,6 +51,74 @@ class DatabaseHelper {
         );
       } catch (_) {}
     }
+    await _ensureSchemaIntegrity(db);
+  }
+
+  Future _onOpen(Database db) async {
+    await _ensureSchemaIntegrity(db);
+  }
+
+  /// فحص وإصلاح هيكلة جداول الكاش والتقارير الأوفلاين تلقائياً عند فتح القاعدة
+  /// لتفادي أي نقص في الأعمدة عند ترقية التطبيق من نسخ سابقة.
+  Future<void> _ensureSchemaIntegrity(Database db) async {
+    await _createOfflineReportTables(db);
+
+    try {
+      final cacheInfo = await db.rawQuery('PRAGMA table_info(Offline_ReportsCache)');
+      final cacheCols = cacheInfo
+          .map((r) => r['name']?.toString() ?? '')
+          .where((n) => n.isNotEmpty)
+          .toSet();
+      const requiredCacheCols = {
+        'Id',
+        'ReportType',
+        'EntityIdentifier',
+        'CurrencyId',
+        'ParametersHash',
+        'file_path',
+        'ledger_signature',
+        'LastSyncTimestamp',
+      };
+
+      if (cacheInfo.isEmpty ||
+          !cacheCols.containsAll(requiredCacheCols) ||
+          cacheCols.length != requiredCacheCols.length) {
+        await db.execute('DROP TABLE IF EXISTS Offline_ReportsCache;');
+        await db.execute('''
+          CREATE TABLE Offline_ReportsCache (
+            Id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ReportType TEXT NOT NULL,
+            EntityIdentifier TEXT NOT NULL,
+            CurrencyId TEXT NOT NULL DEFAULT '',
+            ParametersHash TEXT NOT NULL DEFAULT '',
+            file_path TEXT NOT NULL DEFAULT '',
+            ledger_signature TEXT DEFAULT '',
+            LastSyncTimestamp TEXT NOT NULL,
+            UNIQUE(ReportType, EntityIdentifier, CurrencyId, ParametersHash)
+          )
+        ''');
+      }
+    } catch (_) {}
+
+    try {
+      final ledgerInfo = await db.rawQuery('PRAGMA table_info(offline_ledger_entries)');
+      final ledgerCols = ledgerInfo.map((r) => r['name']?.toString() ?? '').toSet();
+      if (!ledgerCols.contains('tra_lst_id')) {
+        await db.execute(
+          "ALTER TABLE offline_ledger_entries ADD COLUMN tra_lst_id TEXT DEFAULT '';",
+        );
+      }
+    } catch (_) {}
+
+    try {
+      final openInfo = await db.rawQuery('PRAGMA table_info(offline_ledger_opening_balances)');
+      final openCols = openInfo.map((r) => r['name']?.toString() ?? '').toSet();
+      if (!openCols.contains('ledger_signature')) {
+        await db.execute(
+          "ALTER TABLE offline_ledger_opening_balances ADD COLUMN ledger_signature TEXT;",
+        );
+      }
+    } catch (_) {}
   }
 
   Future _onConfigure(Database db) async {
@@ -782,8 +851,8 @@ class DatabaseHelper {
         EntityIdentifier TEXT NOT NULL,
         CurrencyId TEXT NOT NULL DEFAULT '',
         ParametersHash TEXT NOT NULL DEFAULT '',
-        file_path TEXT NOT NULL,
-        ledger_signature TEXT,
+        file_path TEXT NOT NULL DEFAULT '',
+        ledger_signature TEXT DEFAULT '',
         LastSyncTimestamp TEXT NOT NULL,
         UNIQUE(ReportType, EntityIdentifier, CurrencyId, ParametersHash)
       )
